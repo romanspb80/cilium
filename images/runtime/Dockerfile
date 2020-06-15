@@ -35,6 +35,7 @@ COPY iptables-wrapper /usr/sbin/iptables-wrapper
 COPY configure-iptables-wrapper.sh /tmp/configure-iptables-wrapper.sh
 RUN /tmp/configure-iptables-wrapper.sh
 
+# XXX: perhaps these should be copied into /usr/local/bin, so that it's easy to copy-out
 COPY --from=llvm-dist /bin /bin
 COPY --from=bpftool-dist /bin /bin
 COPY --from=iproute2-dist /bin /bin
