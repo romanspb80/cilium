@@ -69,6 +69,7 @@ Dockerfile* @cilium/build
 *.Jenkinsfile @cilium/ci
 /hubble-relay/ @cilium/hubble
 /hubble-relay.Dockerfile @cilium/hubble
+/images @cilium/build
 /install/kubernetes/ @cilium/kubernetes @cilium/docs @cilium/helm
 jenkinsfiles @cilium/ci
 Jenkinsfile.nightly @cilium/ci
@@ -144,6 +145,7 @@ Jenkinsfile.nightly @cilium/ci
 /tests/ @cilium/ci
 Vagrantfile @cilium/ci
 /Vagrantfile @cilium/contributing
+/.github/workflows @cilium/build
 /go.sum @cilium/vendor
 /go.mod @cilium/vendor
 /vagrant_box_defaults.rb @cilium/ci
