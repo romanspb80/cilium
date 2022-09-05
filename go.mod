@@ -30,10 +30,10 @@ require (
 	github.com/docker/libnetwork v0.8.0-dev.2.0.20210525090646-64b7a4574d14
 	github.com/fsnotify/fsnotify v1.5.1
 	github.com/go-openapi/errors v0.20.2
-	github.com/go-openapi/loads v0.21.1
+	github.com/go-openapi/loads v0.21.2
 	github.com/go-openapi/runtime v0.23.1
-	github.com/go-openapi/spec v0.20.4
-	github.com/go-openapi/strfmt v0.21.2
+	github.com/go-openapi/spec v0.20.6
+	github.com/go-openapi/strfmt v0.21.3
 	github.com/go-openapi/swag v0.21.1
 	github.com/go-openapi/validate v0.21.0
 	github.com/gogo/protobuf v1.3.2
@@ -69,7 +69,7 @@ require (
 	github.com/spf13/cobra v1.3.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.10.1
-	github.com/stretchr/testify v1.7.0
+	github.com/stretchr/testify v1.8.0
 	github.com/vishvananda/netlink v1.1.1-0.20220125195016-0639e7e787ba
 	github.com/vishvananda/netns v0.0.0-20211101163701-50045581ed74
 	go.etcd.io/etcd/api/v3 v3.5.2
@@ -78,7 +78,7 @@ require (
 	go.uber.org/goleak v1.1.12
 	go.uber.org/multierr v1.7.0
 	go.universe.tf/metallb v0.11.0
-	golang.org/x/crypto v0.0.0-20211215153901-e495a2d5b3d3
+	golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20220111092808-5a964db01320
@@ -111,8 +111,6 @@ require (
 	github.com/Azure/go-autorest/logger v0.2.1 // indirect
 	github.com/Azure/go-autorest/tracing v0.6.0 // indirect
 	github.com/Microsoft/go-winio v0.5.1 // indirect
-	github.com/PuerkitoBio/purell v1.1.1 // indirect
-	github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578 // indirect
 	github.com/armon/go-metrics v0.3.10 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.9.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.1.5 // indirect
@@ -142,10 +140,9 @@ require (
 	github.com/go-logfmt/logfmt v0.5.1 // indirect
 	github.com/go-logr/logr v1.2.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/go-openapi/analysis v0.21.2 // indirect
+	github.com/go-openapi/analysis v0.21.4 // indirect
 	github.com/go-openapi/jsonpointer v0.19.5 // indirect
-	github.com/go-openapi/jsonreference v0.19.6 // indirect
-	github.com/go-stack/stack v1.8.1 // indirect
+	github.com/go-openapi/jsonreference v0.20.0 // indirect
 	github.com/gobuffalo/flect v0.2.3 // indirect
 	github.com/golang-jwt/jwt/v4 v4.2.0 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
@@ -201,7 +198,7 @@ require (
 	github.com/tklauser/numcpus v0.3.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.2 // indirect
 	gitlab.com/golang-commonmark/puny v0.0.0-20191124015043-9f83538fa04f // indirect
-	go.mongodb.org/mongo-driver v1.8.3 // indirect
+	go.mongodb.org/mongo-driver v1.10.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/zap v1.19.1 // indirect
 	golang.org/x/mod v0.5.1 // indirect
@@ -212,7 +209,7 @@ require (
 	google.golang.org/appengine v1.6.7 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
-	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/gengo v0.0.0-20210813121822-485abfe95c7c // indirect
 	k8s.io/klog v1.0.0 // indirect
 	k8s.io/utils v0.0.0-20211116205334-6203023598ed // indirect
