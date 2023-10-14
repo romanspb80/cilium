@@ -102,13 +102,24 @@
 	__eval(__declare_tailcall_if_, COND)(NAME)
 
 #define __invoke_tailcall_if_0(NAME, FUNC)    \
-	return FUNC(ctx)
+	FUNC(ctx)
 #define __invoke_tailcall_if_1(NAME, FUNC)    \
-	do {                                  \
+	({				      \
 		ep_tail_call(ctx, NAME);      \
-		ret = DROP_MISSED_TAIL_CALL;  \
-	} while (0)
+		DROP_MISSED_TAIL_CALL;        \
+	})
 #define invoke_tailcall_if(COND, NAME, FUNC)  \
 	__eval(__invoke_tailcall_if_, COND)(NAME, FUNC)
+
+#define __invoke_traced_tailcall_if_0(NAME, FUNC, TRACE, EXT_ERR)	\
+	FUNC(ctx, TRACE, EXT_ERR)
+#define __invoke_traced_tailcall_if_1(NAME, FUNC, TRACE, EXT_ERR)	\
+	({								\
+		ep_tail_call(ctx, NAME);				\
+		DROP_MISSED_TAIL_CALL;					\
+	})
+#define invoke_traced_tailcall_if(COND, NAME, FUNC, TRACE, EXT_ERR)	\
+	__eval(__invoke_traced_tailcall_if_, COND)(NAME, FUNC, TRACE,	\
+						   EXT_ERR)
 
 #endif /* TAILCALL_H */

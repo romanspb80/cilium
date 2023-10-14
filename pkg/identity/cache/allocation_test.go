@@ -11,6 +11,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/checker"
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/identity"
 	cacheKey "github.com/cilium/cilium/pkg/identity/key"
 	"github.com/cilium/cilium/pkg/idpool"
@@ -80,7 +81,7 @@ func (s *IdentityCacheTestSuite) TestAllocateIdentityReserved(c *C) {
 type IdentityAllocatorSuite struct{}
 
 func (ias *IdentityAllocatorSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 type IdentityAllocatorEtcdSuite struct {
@@ -90,15 +91,11 @@ type IdentityAllocatorEtcdSuite struct {
 var _ = Suite(&IdentityAllocatorEtcdSuite{})
 
 func (e *IdentityAllocatorEtcdSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 func (e *IdentityAllocatorEtcdSuite) SetUpTest(c *C) {
-	kvstore.SetupDummy("etcd")
-}
-
-func (e *IdentityAllocatorEtcdSuite) TearDownTest(c *C) {
-	kvstore.Client().Close(context.TODO())
+	kvstore.SetupDummy(c, "etcd")
 }
 
 type IdentityAllocatorConsulSuite struct {
@@ -108,15 +105,11 @@ type IdentityAllocatorConsulSuite struct {
 var _ = Suite(&IdentityAllocatorConsulSuite{})
 
 func (e *IdentityAllocatorConsulSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 func (e *IdentityAllocatorConsulSuite) SetUpTest(c *C) {
-	kvstore.SetupDummy("consul")
-}
-
-func (e *IdentityAllocatorConsulSuite) TearDownTest(c *C) {
-	kvstore.Client().Close(context.TODO())
+	kvstore.SetupDummy(c, "consul")
 }
 
 type dummyOwner struct {
@@ -236,7 +229,7 @@ func (ias *IdentityAllocatorSuite) TestEventWatcherBatching(c *C) {
 }
 
 func (ias *IdentityAllocatorSuite) TestGetIdentityCache(c *C) {
-	identity.InitWellKnownIdentities(&fakeConfig.Config{})
+	identity.InitWellKnownIdentities(&fakeConfig.Config{}, cmtypes.ClusterInfo{Name: "default", ID: 5})
 	// The nils are only used by k8s CRD identities. We default to kvstore.
 	mgr := NewCachingIdentityAllocator(newDummyOwner())
 	<-mgr.InitIdentityAllocator(nil)
@@ -254,7 +247,7 @@ func (ias *IdentityAllocatorSuite) TestAllocator(c *C) {
 	lbls3 := labels.NewLabelsFromSortedList("id=bar;user=susan")
 
 	owner := newDummyOwner()
-	identity.InitWellKnownIdentities(&fakeConfig.Config{})
+	identity.InitWellKnownIdentities(&fakeConfig.Config{}, cmtypes.ClusterInfo{Name: "default", ID: 5})
 	// The nils are only used by k8s CRD identities. We default to kvstore.
 	mgr := NewCachingIdentityAllocator(owner)
 	<-mgr.InitIdentityAllocator(nil)
@@ -339,7 +332,7 @@ func (ias *IdentityAllocatorSuite) TestLocalAllocation(c *C) {
 	lbls1 := labels.NewLabelsFromSortedList("cidr:192.0.2.3/32")
 
 	owner := newDummyOwner()
-	identity.InitWellKnownIdentities(&fakeConfig.Config{})
+	identity.InitWellKnownIdentities(&fakeConfig.Config{}, cmtypes.ClusterInfo{Name: "default", ID: 5})
 	// The nils are only used by k8s CRD identities. We default to kvstore.
 	mgr := NewCachingIdentityAllocator(owner)
 	<-mgr.InitIdentityAllocator(nil)

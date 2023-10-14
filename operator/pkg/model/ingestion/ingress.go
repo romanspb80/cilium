@@ -4,7 +4,6 @@
 package ingestion
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/cilium/cilium/operator/pkg/ingress/annotations"
@@ -17,7 +16,7 @@ import (
 // Ingress translates an Ingress resource to a HTTPListener.
 // This function does not check IngressClass (via field or annotation).
 // It's expected that only relevant Ingresses will have this function called on them.
-func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
+func Ingress(ing slim_networkingv1.Ingress, defaultSecretNamespace, defaultSecretName string) []model.HTTPListener {
 
 	// First, we make a map of HTTPListeners, with the hostname
 	// as the key, so that we can make sure we match up any
@@ -87,10 +86,16 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 		l.Port = 80
 		l.Sources = model.AddSource(l.Sources, sourceResource)
 		if !ok {
-			l.Name = fmt.Sprintf("ing-%s-%s-%s", ing.Name, ing.Namespace, host)
+			l.Name = "ing-" + ing.Name + "-" + ing.Namespace + "-" + host
 		}
 
 		l.Hostname = host
+		if rule.HTTP == nil {
+			log.WithField(logfields.Ingress, ing.Namespace+"/"+ing.Name).
+				Warn("Invalid Ingress rule without spec.rules.HTTP defined, skipping rule")
+			continue
+		}
+
 		for _, path := range rule.HTTP.Paths {
 
 			route := model.HTTPRoute{}
@@ -151,8 +156,15 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 						Namespace: ing.Namespace,
 					},
 				}
-
+			} else if defaultSecretNamespace != "" && defaultSecretName != "" {
+				l.TLS = []model.TLSSecret{
+					{
+						Name:      defaultSecretName,
+						Namespace: defaultSecretNamespace,
+					},
+				}
 			}
+
 			l.Port = 443
 			l.Hostname = host
 			l.Service = getService(ing)
@@ -168,6 +180,13 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 							Name: tlsConfig.SecretName,
 							// Secret has to be in the same namespace as the Ingress.
 							Namespace: ing.Namespace,
+						},
+					}
+				} else if defaultSecretNamespace != "" && defaultSecretName != "" {
+					defaultListener.TLS = []model.TLSSecret{
+						{
+							Name:      defaultSecretName,
+							Namespace: defaultSecretNamespace,
 						},
 					}
 				}

@@ -198,7 +198,7 @@ ctx_set_encap_info(struct xdp_md *ctx, __u32 src_ip, __be16 src_port,
 			geneve->opt_len = (__u8)(opt_len >> 2);
 			geneve->protocol_type = bpf_htons(ETH_P_TEB);
 
-			seclabel = bpf_htonl(seclabel << 8);
+			seclabel = bpf_htonl(get_tunnel_id(seclabel) << 8);
 			memcpy(&geneve->vni, &seclabel, sizeof(__u32));
 		}
 		break;
@@ -211,7 +211,7 @@ ctx_set_encap_info(struct xdp_md *ctx, __u32 src_ip, __be16 src_port,
 
 			vxlan->vx_flags = bpf_htonl(1U << 27);
 
-			seclabel = bpf_htonl(seclabel << 8);
+			seclabel = bpf_htonl(get_tunnel_id(seclabel) << 8);
 			memcpy(&vxlan->vx_vni, &seclabel, sizeof(__u32));
 		}
 		break;
@@ -238,6 +238,32 @@ ctx_set_encap_info(struct xdp_md *ctx, __u32 src_ip, __be16 src_port,
 	*ifindex = 0;
 
 	return CTX_ACT_REDIRECT;
+}
+
+static __always_inline __maybe_unused int
+ctx_set_tunnel_opt(struct xdp_md *ctx, void *opt, __u32 opt_len)
+{
+	const __u32 geneve_off = ETH_HLEN + sizeof(struct iphdr) + sizeof(struct udphdr);
+	struct genevehdr geneve;
+
+	/* add free space after GENEVE header: */
+	if (ctx_adjust_hroom(ctx, opt_len, BPF_ADJ_ROOM_MAC, ctx_adjust_hroom_flags()) < 0)
+		return DROP_INVALID;
+
+	/* write the options */
+	if (ctx_store_bytes(ctx, geneve_off + sizeof(geneve), opt, opt_len, 0) < 0)
+		return DROP_WRITE_ERROR;
+
+	/* update the options length in the GENEVE header: */
+	if (ctx_load_bytes(ctx, geneve_off, &geneve, sizeof(geneve)) < 0)
+		return DROP_INVALID;
+
+	geneve.opt_len += (__u8)(opt_len >> 2);
+
+	if (ctx_store_bytes(ctx, geneve_off, &geneve, sizeof(geneve), 0) < 0)
+		return DROP_WRITE_ERROR;
+
+	return 0;
 }
 #endif /* HAVE_ENCAP */
 

@@ -6,6 +6,7 @@ package gateway_api
 import (
 	"context"
 
+	"github.com/bombsimon/logrusr/v4"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sirupsen/logrus"
@@ -18,10 +19,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
+	"github.com/cilium/cilium/operator/pkg/gateway-api/helpers"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
@@ -59,7 +62,10 @@ func NewController(enableSecretSync bool, secretsNamespace string, idleTimeoutSe
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		// Disable controller metrics server in favour of cilium's metrics server.
-		MetricsBindAddress: "0",
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
+		Logger: logrusr.New(log, logrusr.WithName("controller-runtime")),
 	})
 	if err != nil {
 		return nil, err
@@ -182,10 +188,10 @@ func getGatewaysForSecret(ctx context.Context, c client.Client, obj client.Objec
 			}
 
 			for _, cert := range l.TLS.CertificateRefs {
-				if !IsSecret(cert) {
+				if !helpers.IsSecret(cert) {
 					continue
 				}
-				ns := namespaceDerefOr(cert.Namespace, gw.GetNamespace())
+				ns := helpers.NamespaceDerefOr(cert.Namespace, gw.GetNamespace())
 				if string(cert.Name) == obj.GetName() &&
 					ns == obj.GetNamespace() {
 					gateways = append(gateways, client.ObjectKey{

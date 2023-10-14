@@ -18,10 +18,18 @@ type FakeNodeHandler struct {
 	Nodes map[string]nodeTypes.Node
 }
 
+func (n *FakeNodeHandler) GetNodeID(_ net.IP) (uint16, bool) {
+	return 0, true
+}
+
 // NewNodeHandler returns a fake NodeHandler that stores the nodes,
 // but performs no other actions.
 func NewNodeHandler() *FakeNodeHandler {
 	return &FakeNodeHandler{Nodes: make(map[string]nodeTypes.Node)}
+}
+
+func (n *FakeNodeHandler) Name() string {
+	return "fake-node-handler"
 }
 
 func (n *FakeNodeHandler) NodeAdd(newNode nodeTypes.Node) error {
@@ -45,6 +53,9 @@ func (n *FakeNodeHandler) NodeDelete(node nodeTypes.Node) error {
 	return nil
 }
 
+func (n *FakeNodeHandler) AllNodeValidateImplementation() {
+}
+
 func (n *FakeNodeHandler) NodeValidateImplementation(node nodeTypes.Node) error {
 	return nil
 }
@@ -58,15 +69,9 @@ func (n *FakeNodeHandler) NodeNeighDiscoveryEnabled() bool {
 }
 
 func (n *FakeNodeHandler) NodeNeighborRefresh(ctx context.Context, node nodeTypes.Node) {
-	return
 }
 
 func (n *FakeNodeHandler) NodeCleanNeighbors(migrateOnly bool) {
-	return
-}
-
-func (n *FakeNodeHandler) AllocateNodeID(_ net.IP) uint16 {
-	return 0
 }
 
 func (n *FakeNodeHandler) GetNodeIP(_ uint16) string {
@@ -78,5 +83,4 @@ func (n *FakeNodeHandler) DumpNodeIDs() []*models.NodeID {
 }
 
 func (n *FakeNodeHandler) RestoreNodeIDs() {
-	return
 }

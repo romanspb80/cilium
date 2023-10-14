@@ -67,10 +67,8 @@ func NewAPI(subnets []*ipamTypes.Subnet, vpcs []*ipamTypes.VirtualNetwork, secur
 	// Use 10.10.0.0/17 for IP allocations
 	cidrSet, _ := cidrset.NewCIDRSet(baseCidr, 17)
 	podCidr, _ := cidrSet.AllocateNext()
-	podCidrRange, err := ipallocator.NewCIDRRange(podCidr)
-	if err != nil {
-		panic(err)
-	}
+	podCidrRange := ipallocator.NewCIDRRange(podCidr)
+
 	// Use 10.10.128.0/17 for prefix allocations
 	pdCidr, _ := cidrSet.AllocateNext()
 	pdCidrRange, err := cidrset.NewCIDRSet(pdCidr, 28)
@@ -524,6 +522,39 @@ func (e *API) UnassignENIPrefixes(ctx context.Context, eniID string, prefixes []
 		return nil
 	}
 	return fmt.Errorf("Unable to find ENI with ID %s", eniID)
+}
+
+func (e *API) GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap, instanceID string) (*ipamTypes.Instance, error) {
+	instance := ipamTypes.Instance{}
+	instance.Interfaces = map[string]ipamTypes.InterfaceRevision{}
+
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
+
+	for id, enis := range e.enis {
+		if id != instanceID {
+			continue
+		}
+		for ifaceID, eni := range enis {
+			if subnets != nil {
+				if subnet, ok := subnets[eni.Subnet.ID]; ok && subnet.CIDR != nil {
+					eni.Subnet.CIDR = subnet.CIDR.String()
+				}
+			}
+
+			if vpcs != nil {
+				if vpc, ok := vpcs[eni.VPC.ID]; ok {
+					eni.VPC.PrimaryCIDR = vpc.PrimaryCIDR
+					eni.VPC.CIDRs = vpc.CIDRs
+				}
+			}
+
+			eniRevision := ipamTypes.InterfaceRevision{Resource: eni.DeepCopy()}
+			instance.Interfaces[ifaceID] = eniRevision
+		}
+	}
+
+	return &instance, nil
 }
 
 func (e *API) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error) {

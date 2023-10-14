@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
 type stringTable struct {
@@ -81,21 +84,12 @@ func (st *stringTable) Lookup(offset uint32) (string, error) {
 }
 
 func (st *stringTable) lookup(offset uint32) (string, error) {
-	i := search(st.offsets, offset)
-	if i == len(st.offsets) || st.offsets[i] != offset {
+	i, found := slices.BinarySearch(st.offsets, offset)
+	if !found {
 		return "", fmt.Errorf("offset %d isn't start of a string", offset)
 	}
 
 	return st.strings[i], nil
-}
-
-func (st *stringTable) Length() int {
-	if len(st.offsets) == 0 || len(st.strings) == 0 {
-		return 0
-	}
-
-	last := len(st.offsets) - 1
-	return int(st.offsets[last]) + len(st.strings[last]) + 1
 }
 
 func (st *stringTable) Marshal(w io.Writer) error {
@@ -112,24 +106,9 @@ func (st *stringTable) Marshal(w io.Writer) error {
 	return nil
 }
 
-// search is a copy of sort.Search specialised for uint32.
-//
-// Licensed under https://go.dev/LICENSE
-func search(ints []uint32, needle uint32) int {
-	// Define f(-1) == false and f(n) == true.
-	// Invariant: f(i-1) == false, f(j) == true.
-	i, j := 0, len(ints)
-	for i < j {
-		h := int(uint(i+j) >> 1) // avoid overflow when computing h
-		// i ≤ h < j
-		if !(ints[h] >= needle) {
-			i = h + 1 // preserves f(i-1) == false
-		} else {
-			j = h // preserves f(j) == true
-		}
-	}
-	// i == j, f(i-1) == false, and f(j) (= f(i)) == true  =>  answer is i.
-	return i
+// Num returns the number of strings in the table.
+func (st *stringTable) Num() int {
+	return len(st.strings)
 }
 
 // stringTableBuilder builds BTF string tables.
@@ -141,25 +120,19 @@ type stringTableBuilder struct {
 // newStringTableBuilder creates a builder with the given capacity.
 //
 // capacity may be zero.
-func newStringTableBuilder() *stringTableBuilder {
-	stb := &stringTableBuilder{0, make(map[string]uint32)}
-	// Ensure that the empty string is at index 0.
-	stb.append("")
-	return stb
-}
+func newStringTableBuilder(capacity int) *stringTableBuilder {
+	var stb stringTableBuilder
 
-// newStringTableBuilderFromTable creates a new builder from an existing string table.
-func newStringTableBuilderFromTable(contents *stringTable) *stringTableBuilder {
-	stb := &stringTableBuilder{0, make(map[string]uint32, len(contents.strings)+1)}
-	stb.append("")
-
-	for _, str := range contents.strings {
-		if str != "" {
-			stb.append(str)
-		}
+	if capacity == 0 {
+		// Use the runtime's small default size.
+		stb.strings = make(map[string]uint32)
+	} else {
+		stb.strings = make(map[string]uint32, capacity)
 	}
 
-	return stb
+	// Ensure that the empty string is at index 0.
+	stb.append("")
+	return &stb
 }
 
 // Add a string to the table.
@@ -195,7 +168,6 @@ func (stb *stringTableBuilder) Lookup(str string) (uint32, error) {
 	}
 
 	return offset, nil
-
 }
 
 // Length returns the length in bytes.
@@ -203,19 +175,21 @@ func (stb *stringTableBuilder) Length() int {
 	return int(stb.length)
 }
 
-// Marshal a string table into its binary representation.
-func (stb *stringTableBuilder) Marshal() []byte {
-	buf := make([]byte, stb.Length())
-	stb.MarshalBuffer(buf)
+// AppendEncoded appends the string table to the end of the provided buffer.
+func (stb *stringTableBuilder) AppendEncoded(buf []byte) []byte {
+	n := len(buf)
+	buf = append(buf, make([]byte, stb.Length())...)
+	strings := buf[n:]
+	for str, offset := range stb.strings {
+		copy(strings[offset:], str)
+	}
 	return buf
 }
 
-// Marshal a string table into a pre-allocated buffer.
-//
-// The buffer must be at least of size Length().
-func (stb *stringTableBuilder) MarshalBuffer(buf []byte) {
-	for str, offset := range stb.strings {
-		n := copy(buf[offset:], str)
-		buf[offset+uint32(n)] = 0
+// Copy the string table builder.
+func (stb *stringTableBuilder) Copy() *stringTableBuilder {
+	return &stringTableBuilder{
+		stb.length,
+		maps.Clone(stb.strings),
 	}
 }

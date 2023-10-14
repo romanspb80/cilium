@@ -31,6 +31,7 @@ import (
 	"github.com/cilium/cilium/pkg/hubble/observer"
 	"github.com/cilium/cilium/pkg/hubble/observer/observeroption"
 	"github.com/cilium/cilium/pkg/hubble/parser"
+	parserOptions "github.com/cilium/cilium/pkg/hubble/parser/options"
 	"github.com/cilium/cilium/pkg/hubble/peer"
 	"github.com/cilium/cilium/pkg/hubble/peer/serviceoption"
 	"github.com/cilium/cilium/pkg/hubble/recorder"
@@ -52,7 +53,8 @@ func (d *Daemon) getHubbleStatus(ctx context.Context) *models.HubbleStatus {
 		return &models.HubbleStatus{State: models.HubbleStatusStateDisabled}
 	}
 
-	if d.hubbleObserver == nil {
+	obs := d.hubbleObserver.Load()
+	if obs == nil {
 		return &models.HubbleStatus{
 			State: models.HubbleStatusStateWarning,
 			Msg:   "Server not initialized",
@@ -60,7 +62,7 @@ func (d *Daemon) getHubbleStatus(ctx context.Context) *models.HubbleStatus {
 	}
 
 	req := &observerpb.ServerStatusRequest{}
-	status, err := d.hubbleObserver.ServerStatus(ctx, req)
+	status, err := obs.ServerStatus(ctx, req)
 	if err != nil {
 		return &models.HubbleStatus{State: models.HubbleStatusStateFailure, Msg: err.Error()}
 	}
@@ -97,6 +99,7 @@ func (d *Daemon) launchHubble() {
 	var (
 		observerOpts []observeroption.Option
 		localSrvOpts []serveroption.Option
+		parserOpts   []parserOptions.Option
 	)
 
 	if len(option.Config.HubbleMonitorEvents) > 0 {
@@ -137,8 +140,19 @@ func (d *Daemon) launchHubble() {
 		)
 	}
 
+	if option.Config.HubbleRedactEnabled {
+		parserOpts = append(
+			parserOpts,
+			parserOptions.Redact(
+				logger,
+				option.Config.HubbleRedactHttpURLQuery,
+				option.Config.HubbleRedactKafkaApiKey,
+			),
+		)
+	}
+
 	d.linkCache = link.NewLinkCache()
-	payloadParser, err := parser.New(logger, d, d, d, d, d, d.linkCache, d.cgroupManager)
+	payloadParser, err := parser.New(logger, d, d, d, d, d, d.linkCache, d.cgroupManager, parserOpts...)
 	if err != nil {
 		logger.WithError(err).Error("Failed to initialize Hubble")
 		return
@@ -159,11 +173,14 @@ func (d *Daemon) launchHubble() {
 			exporteroption.WithPath(option.Config.HubbleExportFilePath),
 			exporteroption.WithMaxSizeMB(option.Config.HubbleExportFileMaxSizeMB),
 			exporteroption.WithMaxBackups(option.Config.HubbleExportFileMaxBackups),
+			exporteroption.WithAllowList(option.Config.HubbleExportAllowlist),
+			exporteroption.WithDenyList(option.Config.HubbleExportDenylist),
+			exporteroption.WithFieldMask(option.Config.HubbleExportFieldmask),
 		}
 		if option.Config.HubbleExportFileCompress {
 			exporterOpts = append(exporterOpts, exporteroption.WithCompress())
 		}
-		hubbleExporter, err := exporter.NewExporter(logger, exporterOpts...)
+		hubbleExporter, err := exporter.NewExporter(d.ctx, logger, exporterOpts...)
 		if err != nil {
 			logger.WithError(err).Error("Failed to configure Hubble export")
 		} else {
@@ -171,16 +188,21 @@ func (d *Daemon) launchHubble() {
 			observerOpts = append(observerOpts, opt)
 		}
 	}
+	namespaceManager := observer.NewNamespaceManager()
+	go namespaceManager.Run(d.ctx)
 
-	d.hubbleObserver, err = observer.NewLocalServer(payloadParser, logger,
+	hubbleObserver, err := observer.NewLocalServer(
+		payloadParser,
+		namespaceManager,
+		logger,
 		observerOpts...,
 	)
 	if err != nil {
 		logger.WithError(err).Error("Failed to initialize Hubble")
 		return
 	}
-	go d.hubbleObserver.Start()
-	d.monitorAgent.RegisterNewConsumer(monitor.NewConsumer(d.hubbleObserver))
+	go hubbleObserver.Start()
+	d.monitorAgent.RegisterNewConsumer(monitor.NewConsumer(hubbleObserver))
 
 	// configure a local hubble instance that serves more gRPC services
 	sockPath := "unix://" + option.Config.HubbleSocketPath
@@ -195,7 +217,7 @@ func (d *Daemon) launchHubble() {
 	localSrvOpts = append(localSrvOpts,
 		serveroption.WithUnixSocketListener(sockPath),
 		serveroption.WithHealthService(),
-		serveroption.WithObserverService(d.hubbleObserver),
+		serveroption.WithObserverService(hubbleObserver),
 		serveroption.WithPeerService(peerSvc),
 		serveroption.WithInsecure(),
 	)
@@ -243,7 +265,7 @@ func (d *Daemon) launchHubble() {
 			serveroption.WithTCPListener(address),
 			serveroption.WithHealthService(),
 			serveroption.WithPeerService(peerSvc),
-			serveroption.WithObserverService(d.hubbleObserver),
+			serveroption.WithObserverService(hubbleObserver),
 		}
 
 		// Hubble TLS/mTLS setup.
@@ -301,6 +323,8 @@ func (d *Daemon) launchHubble() {
 			}
 		}()
 	}
+
+	d.hubbleObserver.Store(hubbleObserver)
 }
 
 // GetIdentity looks up identity by ID from Cilium's identity cache. Hubble uses the identity info

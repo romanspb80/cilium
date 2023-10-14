@@ -24,6 +24,9 @@ import (
 // swagger:model StatusResponse
 type StatusResponse struct {
 
+	// Status of Mutual Authentication certificate provider
+	AuthCertificateProvider *Status `json:"auth-certificate-provider,omitempty"`
+
 	// Status of bandwidth manager
 	BandwidthManager *BandwidthManager `json:"bandwidth-manager,omitempty"`
 
@@ -78,6 +81,9 @@ type StatusResponse struct {
 	// Status of IP address management
 	Ipam *IPAMStatus `json:"ipam,omitempty"`
 
+	// Status of IPv4 BIG TCP
+	IPV4BigTCP *IPV4BigTCP `json:"ipv4-big-tcp,omitempty"`
+
 	// Status of IPv6 BIG TCP
 	IPV6BigTCP *IPV6BigTCP `json:"ipv6-big-tcp,omitempty"`
 
@@ -106,6 +112,10 @@ type StatusResponse struct {
 // Validate validates this status response
 func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 	var res []error
+
+	if err := m.validateAuthCertificateProvider(formats); err != nil {
+		res = append(res, err)
+	}
 
 	if err := m.validateBandwidthManager(formats); err != nil {
 		res = append(res, err)
@@ -171,6 +181,10 @@ func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
+	if err := m.validateIPV4BigTCP(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.validateIPV6BigTCP(formats); err != nil {
 		res = append(res, err)
 	}
@@ -206,6 +220,25 @@ func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *StatusResponse) validateAuthCertificateProvider(formats strfmt.Registry) error {
+	if swag.IsZero(m.AuthCertificateProvider) { // not required
+		return nil
+	}
+
+	if m.AuthCertificateProvider != nil {
+		if err := m.AuthCertificateProvider.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("auth-certificate-provider")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("auth-certificate-provider")
+			}
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -511,6 +544,25 @@ func (m *StatusResponse) validateIpam(formats strfmt.Registry) error {
 	return nil
 }
 
+func (m *StatusResponse) validateIPV4BigTCP(formats strfmt.Registry) error {
+	if swag.IsZero(m.IPV4BigTCP) { // not required
+		return nil
+	}
+
+	if m.IPV4BigTCP != nil {
+		if err := m.IPV4BigTCP.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("ipv4-big-tcp")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("ipv4-big-tcp")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (m *StatusResponse) validateIPV6BigTCP(formats strfmt.Registry) error {
 	if swag.IsZero(m.IPV6BigTCP) { // not required
 		return nil
@@ -664,6 +716,10 @@ func (m *StatusResponse) validateStale(formats strfmt.Registry) error {
 func (m *StatusResponse) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
+	if err := m.contextValidateAuthCertificateProvider(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidateBandwidthManager(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -728,6 +784,10 @@ func (m *StatusResponse) ContextValidate(ctx context.Context, formats strfmt.Reg
 		res = append(res, err)
 	}
 
+	if err := m.contextValidateIPV4BigTCP(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidateIPV6BigTCP(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -759,6 +819,22 @@ func (m *StatusResponse) ContextValidate(ctx context.Context, formats strfmt.Reg
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *StatusResponse) contextValidateAuthCertificateProvider(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.AuthCertificateProvider != nil {
+		if err := m.AuthCertificateProvider.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("auth-certificate-provider")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("auth-certificate-provider")
+			}
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1008,6 +1084,22 @@ func (m *StatusResponse) contextValidateIpam(ctx context.Context, formats strfmt
 				return ve.ValidateName("ipam")
 			} else if ce, ok := err.(*errors.CompositeError); ok {
 				return ce.ValidateName("ipam")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *StatusResponse) contextValidateIPV4BigTCP(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.IPV4BigTCP != nil {
+		if err := m.IPV4BigTCP.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("ipv4-big-tcp")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("ipv4-big-tcp")
 			}
 			return err
 		}

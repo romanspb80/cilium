@@ -17,6 +17,7 @@ import (
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	relaypb "github.com/cilium/cilium/api/v1/relay"
 	"github.com/cilium/cilium/pkg/hubble/build"
+	"github.com/cilium/cilium/pkg/hubble/observer"
 	poolTypes "github.com/cilium/cilium/pkg/hubble/relay/pool/types"
 )
 
@@ -231,6 +232,51 @@ func (s *Server) GetNodes(ctx context.Context, req *observerpb.GetNodesRequest) 
 	return &observerpb.GetNodesResponse{Nodes: nodes}, nil
 }
 
+// GetNamespaces implements observerpb.ObserverClient.GetNamespaces.
+func (s *Server) GetNamespaces(ctx context.Context, req *observerpb.GetNamespacesRequest) (*observerpb.GetNamespacesResponse, error) {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		ctx = metadata.NewOutgoingContext(ctx, md)
+	}
+	// We are not using errgroup.WithContext because we will return partial
+	// results over failing on the first error
+	g := new(errgroup.Group)
+
+	namespaceManager := observer.NewNamespaceManager()
+
+	for _, p := range s.peers.List() {
+		if !isAvailable(p.Conn) {
+			s.opts.log.WithField("address", p.Address).Infof(
+				"No connection to peer %s, skipping", p.Name,
+			)
+			s.peers.ReportOffline(p.Name)
+			continue
+		}
+
+		p := p
+		g.Go(func() error {
+			client := s.opts.ocb.observerClient(&p)
+			nsResp, err := client.GetNamespaces(ctx, req)
+			if err != nil {
+				s.opts.log.WithFields(logrus.Fields{
+					"error": err,
+					"peer":  p,
+				}).Warning("Failed to retrieve namespaces")
+				return nil
+			}
+			for _, ns := range nsResp.GetNamespaces() {
+				namespaceManager.AddNamespace(ns)
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	return &observerpb.GetNamespacesResponse{Namespaces: namespaceManager.GetNamespaces()}, nil
+}
+
 // ServerStatus implements observerpb.ObserverServer.ServerStatus by aggregating
 // the ServerStatus answer of all hubble peers.
 func (s *Server) ServerStatus(ctx context.Context, req *observerpb.ServerStatusRequest) (*observerpb.ServerStatusResponse, error) {
@@ -307,6 +353,7 @@ func (s *Server) ServerStatus(ctx context.Context, req *observerpb.ServerStatusR
 		if resp.UptimeNs < status.UptimeNs {
 			resp.UptimeNs = status.UptimeNs
 		}
+		resp.FlowsRate += status.FlowsRate
 	}
 	return resp, g.Wait()
 }

@@ -4,112 +4,10 @@
 #ifndef __LIB_EGRESS_POLICIES_H_
 #define __LIB_EGRESS_POLICIES_H_
 
+#include "lib/fib.h"
 #include "lib/identity.h"
 
 #include "maps.h"
-
-#ifdef ENABLE_EGRESS_GATEWAY
-
-/* EGRESS_STATIC_PREFIX represents the size in bits of the static prefix part of
- * an egress policy key (i.e. the source IP).
- */
-#define EGRESS_STATIC_PREFIX (sizeof(__be32) * 8)
-#define EGRESS_PREFIX_LEN(PREFIX) (EGRESS_STATIC_PREFIX + (PREFIX))
-#define EGRESS_IPV4_PREFIX EGRESS_PREFIX_LEN(32)
-/* These are special IP values in the CIDR 0.0.0.0/8 range that map to specific
- * case for in the egress gateway policies handling.
- */
-#define EGRESS_GATEWAY_NO_GATEWAY (0)
-#define EGRESS_GATEWAY_EXCLUDED_CIDR bpf_htonl(1)
-
-static __always_inline
-struct egress_gw_policy_entry *lookup_ip4_egress_gw_policy(__be32 saddr, __be32 daddr)
-{
-	struct egress_gw_policy_key key = {
-		.lpm_key = { EGRESS_IPV4_PREFIX, {} },
-		.saddr = saddr,
-		.daddr = daddr,
-	};
-	return map_lookup_elem(&EGRESS_POLICY_MAP, &key);
-}
-
-static __always_inline
-bool egress_gw_request_needs_redirect(struct iphdr *ip4, __u32 *tunnel_endpoint)
-{
-	struct egress_gw_policy_entry *egress_gw_policy;
-	struct endpoint_info *gateway_node_ep;
-
-	egress_gw_policy = lookup_ip4_egress_gw_policy(ip4->saddr, ip4->daddr);
-	if (!egress_gw_policy)
-		return false;
-
-	switch (egress_gw_policy->gateway_ip) {
-	case EGRESS_GATEWAY_NO_GATEWAY:
-		/* If no gateway is found we return that the connection is
-		 * "redirected" and the caller will handle this special case
-		 * and drop the traffic.
-		 */
-		*tunnel_endpoint = EGRESS_GATEWAY_NO_GATEWAY;
-		return true;
-	case EGRESS_GATEWAY_EXCLUDED_CIDR:
-		return false;
-	}
-
-	/* If the gateway node is the local node, then just let the
-	 * packet go through, as it will be SNATed later on by
-	 * handle_nat_fwd().
-	 */
-	gateway_node_ep = __lookup_ip4_endpoint(egress_gw_policy->gateway_ip);
-	if (gateway_node_ep && (gateway_node_ep->flags & ENDPOINT_F_HOST))
-		return false;
-
-	*tunnel_endpoint = egress_gw_policy->gateway_ip;
-	return true;
-}
-
-static __always_inline
-bool egress_gw_snat_needed(struct iphdr *ip4, __be32 *snat_addr)
-{
-	struct egress_gw_policy_entry *egress_gw_policy;
-
-	egress_gw_policy = lookup_ip4_egress_gw_policy(ip4->saddr, ip4->daddr);
-	if (!egress_gw_policy)
-		return false;
-
-	if (egress_gw_policy->gateway_ip == EGRESS_GATEWAY_NO_GATEWAY ||
-	    egress_gw_policy->gateway_ip == EGRESS_GATEWAY_EXCLUDED_CIDR)
-		return false;
-
-	*snat_addr = egress_gw_policy->egress_ip;
-	return true;
-}
-
-static __always_inline
-bool egress_gw_reply_needs_redirect(struct iphdr *ip4, __u32 *tunnel_endpoint,
-				    __u32 *dst_sec_identity)
-{
-	struct egress_gw_policy_entry *egress_policy;
-	struct remote_endpoint_info *info;
-
-	/* Find a matching policy by looking up the reverse address tuple: */
-	egress_policy = lookup_ip4_egress_gw_policy(ip4->daddr, ip4->saddr);
-	if (!egress_policy)
-		return false;
-
-	if (egress_policy->gateway_ip == EGRESS_GATEWAY_NO_GATEWAY ||
-	    egress_policy->gateway_ip == EGRESS_GATEWAY_EXCLUDED_CIDR)
-		return false;
-
-	info = ipcache_lookup4(&IPCACHE_MAP, ip4->daddr, V4_CACHE_KEY_LEN, 0);
-	if (!info || info->tunnel_endpoint == 0)
-		return false;
-
-	*tunnel_endpoint = info->tunnel_endpoint;
-	*dst_sec_identity = info->sec_identity;
-	return true;
-}
-
-#endif /* ENABLE_EGRESS_GATEWAY */
 
 #ifdef ENABLE_SRV6
 struct srv6_srh {
@@ -371,6 +269,7 @@ srv6_create_state_entry(struct __ctx_buff *ctx)
 
 		if (map_update_elem(&SRV6_STATE_MAP6, inner_ips, outer_ips, 0) < 0)
 			return DROP_INVALID;
+		break;
 	}
 #  ifdef ENABLE_IPV4
 	case IPPROTO_IPIP: {
@@ -383,6 +282,7 @@ srv6_create_state_entry(struct __ctx_buff *ctx)
 
 		if (map_update_elem(&SRV6_STATE_MAP4, inner_ips, outer_ips, 0) < 0)
 			return DROP_INVALID;
+		break;
 	}
 #  endif /* ENABLE_IPV4 */
 	}
@@ -579,25 +479,91 @@ srv6_store_meta_sid(struct __ctx_buff *ctx, const union v6addr *sid)
 	ctx_store_meta(ctx, CB_SRV6_SID_4, sid->p4);
 }
 
+#ifdef ENABLE_IPV6
+/* SRv6 encapsulation occurs at the native-dev currently.
+ * Its possible that after encapsulation a fib entry exists which would actually
+ * route the IPv6 destination somewhere else.
+ *
+ * Therefore, this function performs an additional fib lookup on the encap'd
+ * packet to ensure we transmit it via the correct link and with the correct
+ * l2 addresses.
+ */
+static __always_inline int
+srv6_refib(struct __ctx_buff *ctx, int *ext_err)
+{
+	struct bpf_fib_lookup_padded params = {0};
+	__u32 old_oif = ctx_get_ifindex(ctx);
+	void *data, *data_end;
+	struct ipv6hdr *ip6;
+
+	if (!revalidate_data(ctx, &data, &data_end, &ip6))
+		return DROP_INVALID;
+
+	*ext_err = (__s8)fib_lookup_v6(ctx,
+				       &params,
+				       &ip6->saddr,
+				       &ip6->daddr,
+				       BPF_FIB_LOOKUP_OUTPUT);
+
+	switch (*ext_err) {
+	case BPF_FIB_LKUP_RET_SUCCESS:
+		/* We found an oif and ARP was successful.
+		 * We may need to redirect to the appropriate oif, if not
+		 * rewrite the layer 2 and continue processing.
+		 */
+		if (old_oif != params.l.ifindex)
+			return fib_do_redirect(ctx, true, &params,
+					      (__s8 *)ext_err, (int *)&old_oif);
+
+		if (eth_store_daddr(ctx, params.l.dmac, 0) < 0)
+			return DROP_WRITE_ERROR;
+
+		break;
+	case BPF_FIB_LKUP_RET_NO_NEIGH:
+		/* In this case, we found an oif, but ARP failed.
+		 * We can't rule out that oif is a veth, in which ARP is not
+		 * strictly necessary to deliver the packet, since the kernel
+		 * can fill in the veth pair's dmac without it, we lets deliver
+		 * or redirect.
+		 */
+		if (old_oif != params.l.ifindex)
+			return fib_do_redirect(ctx, true, &params,
+					      (__s8 *)ext_err, (int *)&old_oif);
+		break;
+	default:
+		return DROP_NO_FIB;
+	};
+	return CTX_ACT_OK;
+}
+#endif /* ENABLE_IPV6 */
+
 __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_SRV6_ENCAP)
 int tail_srv6_encap(struct __ctx_buff *ctx)
 {
 	struct in6_addr dst_sid;
 	__u32 vrf_id;
 	int ret = 0;
+	int __maybe_unused ext_err = 0;
 
 	srv6_load_meta_sid(ctx, &dst_sid);
 	vrf_id = ctx_load_meta(ctx, CB_SRV6_VRF_ID);
 
 	ret = srv6_handling(ctx, vrf_id, &dst_sid);
-
 	if (ret < 0)
-		return send_drop_notify_error(ctx, SECLABEL, ret, CTX_ACT_DROP,
+		return send_drop_notify_error(ctx, SECLABEL_IPV6, ret, CTX_ACT_DROP,
 					      METRIC_EGRESS);
 
-	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL, 0, 0, 0,
+#ifdef ENABLE_IPV6
+	ret = srv6_refib(ctx, &ext_err);
+	if (ret < 0)
+		return send_drop_notify_ext(ctx, SECLABEL_IPV6, 0, 0, ret, ext_err,
+					   CTX_ACT_DROP, METRIC_EGRESS);
+#endif
+
+	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL_IPV6, 0, 0, 0,
 			  TRACE_REASON_UNKNOWN, 0);
-	return CTX_ACT_OK;
+
+	return ret;
 }
 
 __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_SRV6_DECAP)
@@ -613,11 +579,11 @@ int tail_srv6_decap(struct __ctx_buff *ctx)
 	if (ret < 0)
 		goto error_drop;
 
-	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL, 0, 0, 0,
+	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL_IPV6, 0, 0, 0,
 			  TRACE_REASON_UNKNOWN, 0);
 	return CTX_ACT_OK;
 error_drop:
-		return send_drop_notify_error(ctx, SECLABEL, ret, CTX_ACT_DROP,
+		return send_drop_notify_error(ctx, SECLABEL_IPV6, ret, CTX_ACT_DROP,
 					      METRIC_EGRESS);
 }
 
@@ -628,7 +594,7 @@ int tail_srv6_reply(struct __ctx_buff *ctx)
 
 	ret = srv6_reply(ctx);
 	if (ret < 0)
-		return send_drop_notify_error(ctx, SECLABEL, ret, CTX_ACT_DROP,
+		return send_drop_notify_error(ctx, SECLABEL_IPV6, ret, CTX_ACT_DROP,
 					      METRIC_EGRESS);
 	return CTX_ACT_OK;
 }

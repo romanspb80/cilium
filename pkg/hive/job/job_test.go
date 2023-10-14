@@ -21,6 +21,12 @@ import (
 	"k8s.io/client-go/util/workqueue"
 )
 
+// Configure a generous timeout to prevent flakes when running in a noisy CI environment.
+var (
+	tick    = 10 * time.Millisecond
+	timeout = 5 * time.Second
+)
+
 func TestMain(m *testing.M) {
 	cleanup := func(exitCode int) {
 		// Force garbage-collection to force finalizers to run and catch
@@ -347,6 +353,49 @@ func TestOneShot_RetryRecoverNoShutdown(t *testing.T) {
 	<-shutdown
 }
 
+// This test asserts that when the WithRetry option is used, retries are not
+// attempted after that the hive shutdown process has started.
+func TestOneShot_RetryWhileShuttingDown(t *testing.T) {
+	var (
+		g    Group
+		runs int
+	)
+
+	const retries = 5
+	started := make(chan struct{})
+	shutdown := make(chan struct{})
+
+	h := fixture(func(r Registry, l hive.Lifecycle) {
+		g = r.NewGroup()
+
+		g.Add(
+			OneShot("retry-context-closed", func(ctx context.Context) error {
+				if runs == 0 {
+					close(started)
+				}
+
+				runs++
+				<-ctx.Done()
+				return ctx.Err()
+			}, WithRetry(retries, workqueue.DefaultControllerRateLimiter())),
+		)
+
+		l.Append(g)
+	})
+
+	go func() {
+		// Wait until the job function has started, and then immediately stop the hive
+		<-started
+		h.Shutdown()
+		close(shutdown)
+	}()
+
+	assert.NoError(t, h.Run())
+	assert.Equal(t, 1, runs, "The job function should not have been retried after that the context expired")
+
+	<-shutdown
+}
+
 // This test ensures that the timer function is called repeatedly.
 // Not testing the timer interval is intentional, as there are no guarantees for test execution
 // timeliness in the CI or even locally. This makes assertions of test timing inherently flaky,
@@ -442,11 +491,13 @@ func TestTimer_DoubleTrigger(t *testing.T) {
 
 		g.Add(
 			Timer("on-interval", func(ctx context.Context) error {
-				defer func() { close(ran) }()
+				defer func(iter int) {
+					if iter == 0 {
+						close(ran)
+					}
+				}(i)
 
 				i++
-
-				time.Sleep(100 * time.Millisecond)
 
 				return nil
 			}, 1*time.Hour, WithTrigger(trigger)),
@@ -455,13 +506,15 @@ func TestTimer_DoubleTrigger(t *testing.T) {
 		l.Append(g)
 	})
 
+	// Trigger a few times before we start consuming events, these should coalesce
+	trigger.Trigger()
+	trigger.Trigger()
+	trigger.Trigger()
+
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	trigger.Trigger()
-	trigger.Trigger()
-	trigger.Trigger()
 	<-ran
 
 	if err := h.Stop(context.Background()); err != nil {
@@ -714,9 +767,9 @@ func TestGroup_JobRuntime(t *testing.T) {
 		return nil
 	}))
 
-	h.Stop(context.Background())
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, i)
+	}, timeout, tick)
 
-	if i != 1 {
-		t.Fatal()
-	}
+	h.Stop(context.Background())
 }

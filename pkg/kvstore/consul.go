@@ -52,6 +52,8 @@ var (
 
 	// ErrNotImplemented is the error which is returned when a functionality is not implemented.
 	ErrNotImplemented = errors.New("not implemented")
+
+	consulLeaseKeepaliveControllerGroup = controller.NewGroup("consul-lease-keepalive")
 )
 
 func init() {
@@ -239,8 +241,10 @@ func newConsulClient(ctx context.Context, config *consulAPI.Config, opts *ExtraO
 		statusCheckErrors: make(chan error, 128),
 	}
 
-	client.controllers.UpdateController(fmt.Sprintf("consul-lease-keepalive-%p", c),
+	client.controllers.UpdateController(
+		fmt.Sprintf("consul-lease-keepalive-%p", c),
 		controller.ControllerParams{
+			Group: consulLeaseKeepaliveControllerGroup,
 			DoFunc: func(ctx context.Context) error {
 				wo := &consulAPI.WriteOptions{}
 				_, _, err := c.Session().Renew(lease, wo.WithContext(ctx))
@@ -771,6 +775,9 @@ func (c *consulClient) ListAndWatch(ctx context.Context, name, prefix string, ch
 func (c *consulClient) StatusCheckErrors() <-chan error {
 	return c.statusCheckErrors
 }
+
+// RegisterLeaseExpiredObserver is not implemented for the consul backend
+func (c *consulClient) RegisterLeaseExpiredObserver(prefix string, fn func(key string)) {}
 
 // UserEnforcePresence is not implemented for the consul backend
 func (c *consulClient) UserEnforcePresence(ctx context.Context, name string, roles []string) error {

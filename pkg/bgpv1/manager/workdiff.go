@@ -6,8 +6,9 @@ package manager
 import (
 	"fmt"
 
-	"github.com/cilium/cilium/pkg/bgpv1/agent"
+	v2api "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	v2alpha1api "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
+	"github.com/cilium/cilium/pkg/node"
 )
 
 // reconcileDiff is a helper structure which provides fields and a method set
@@ -16,31 +17,33 @@ import (
 type reconcileDiff struct {
 	// incoming CiliumBGPVirtualRouter configs mapped by their
 	// local ASN.
-	seen map[int]*v2alpha1api.CiliumBGPVirtualRouter
-	// the state of the bgp control plane at the time of this reconcileDiff's
-	// creation.
-	state *agent.ControlPlaneState
+	seen map[int64]*v2alpha1api.CiliumBGPVirtualRouter
+	// the Cilium node information at the time which reconciliation was triggered.
+	node *node.LocalNode
+	// The local CiliumNode node information at the time which reconciliation was triggered.
+	ciliumNode *v2api.CiliumNode
 	// Local ASNs which BgpServers must be instantiated, configured,
 	// and added to the manager. Intended key for `seen` map.
-	register []int
+	register []int64
 	// Local ASNs which BgpServers exist for but current policy has marked
 	// for removal. Intended key for Manager's LocalASNMap.
-	withdraw []int
+	withdraw []int64
 	// Local ASNs which BgpServers exist for but policy associated with server
 	// may have been updated and needs further reconciliation.
 	// Intended key for 'seen' map.
-	reconcile []int
+	reconcile []int64
 }
 
 // newReconcileDiff constructs a new *reconcileDiff with all internal instructures
 // initialized.
-func newReconcileDiff(state *agent.ControlPlaneState) *reconcileDiff {
+func newReconcileDiff(node *node.LocalNode, ciliumNode *v2api.CiliumNode) *reconcileDiff {
 	return &reconcileDiff{
-		seen:      make(map[int]*v2alpha1api.CiliumBGPVirtualRouter),
-		state:     state,
-		register:  []int{},
-		withdraw:  []int{},
-		reconcile: []int{},
+		seen:       make(map[int64]*v2alpha1api.CiliumBGPVirtualRouter),
+		node:       node,
+		ciliumNode: ciliumNode,
+		register:   []int64{},
+		withdraw:   []int64{},
+		reconcile:  []int64{},
 	}
 }
 
@@ -51,7 +54,7 @@ func newReconcileDiff(state *agent.ControlPlaneState) *reconcileDiff {
 // withdraw, or reconcile in the reconcileDiff's respective fields.
 func (wd *reconcileDiff) diff(m LocalASNMap, policy *v2alpha1api.CiliumBGPPeeringPolicy) error {
 	if err := wd.registerOrReconcileDiff(m, policy); err != nil {
-		return fmt.Errorf("encountered error creating reoncile diff: %v", err)
+		return fmt.Errorf("encountered error creating reconcile diff: %v", err)
 	}
 	if err := wd.withdrawDiff(m, policy); err != nil {
 		return fmt.Errorf("encountered error creating reconcile diff: %v", err)

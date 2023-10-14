@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/fswatcher"
 	"github.com/cilium/cilium/pkg/hive"
@@ -34,6 +35,8 @@ var usersManagementCell = cell.Module(
 	cell.Invoke(registerUsersManager),
 )
 
+var usersManagementControllerGroup = controller.NewGroup("clustermesh-users-management")
+
 type UsersManagementConfig struct {
 	ClusterUsersEnabled    bool
 	ClusterUsersConfigPath string
@@ -55,6 +58,7 @@ type usersConfigFile struct {
 
 type usersManager struct {
 	UsersManagementConfig
+	clusterInfo cmtypes.ClusterInfo
 
 	client        kvstore.BackendOperationsUserMgmt
 	clientPromise promise.Promise[kvstore.BackendOperationsUserMgmt]
@@ -66,7 +70,12 @@ type usersManager struct {
 	wg   sync.WaitGroup
 }
 
-func registerUsersManager(lc hive.Lifecycle, cfg UsersManagementConfig, clientPromise promise.Promise[kvstore.BackendOperationsUserMgmt]) error {
+func registerUsersManager(
+	lc hive.Lifecycle,
+	cfg UsersManagementConfig,
+	cinfo cmtypes.ClusterInfo,
+	clientPromise promise.Promise[kvstore.BackendOperationsUserMgmt],
+) error {
 	if !cfg.ClusterUsersEnabled {
 		log.Info("etcd users management disabled")
 		return nil
@@ -97,6 +106,7 @@ func (us *usersManager) Start(hive.HookContext) error {
 	}
 
 	us.manager.UpdateController(usersMgmtCtrl, controller.ControllerParams{
+		Group:   usersManagementControllerGroup,
 		Context: context.Background(),
 		DoFunc:  us.sync,
 	})
@@ -164,7 +174,7 @@ func (us *usersManager) sync(ctx context.Context) error {
 	}
 
 	for _, user := range users.Users {
-		if user.Name == cfg.clusterName {
+		if user.Name == us.clusterInfo.Name {
 			continue
 		}
 

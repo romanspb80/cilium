@@ -1,4 +1,4 @@
-name: ConformanceK8sKind
+name: Conformance K8s Kind
 
 # Any change in triggers needs to be reflected in the concurrency group.
 on:
@@ -21,15 +21,19 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  kind_version: v0.19.0
+  # renovate: datasource=github-releases depName=kubernetes-sigs/kind
+  kind_version: v0.20.0
   cluster_name: cilium-testing
   # renovate: datasource=github-releases depName=cilium/cilium-cli
-  cilium_cli_version: v0.14.5
+  cilium_cli_version: v0.15.10
   cilium_cli_ci_version:
-  k8s_version: v1.27.1
+  CILIUM_CLI_MODE: helm
+  # renovate: datasource=docker depName=kindest/node
+  k8s_version: v1.28.0
 
 jobs:
   kubernetes-e2e:
+    name: Installation and Conformance Test
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -42,7 +46,7 @@ jobs:
 
     steps:
       - name: Checkout main branch to access local actions
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4.0.0
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
@@ -120,51 +124,32 @@ jobs:
           echo "${fixed_coredns}"
           printf '%s' "${fixed_coredns}" | /usr/local/bin/kubectl apply -f -
 
+      - name: Get Cilium's default values
+        id: default_vars
+        uses: ./.github/actions/helm-default
+        with:
+          image-tag: ${{ github.event.pull_request.head.sha }}
+
       - name: Set up job variables
         id: vars
         run: |
-          if [ ${{ github.event.pull_request }} ]; then
-            SHA=${{ github.event.pull_request.head.sha }}
-          else
-            SHA=${{ github.sha }}
-          fi
-
           # Note: On Kind, we install Cilium with HostPort (portmap CNI chaining) enabled,
           # to ensure coverage of that feature in cilium connectivity test
-          CILIUM_INSTALL_DEFAULTS="--chart-directory=install/kubernetes/cilium \
-            --helm-set=image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-ci \
-            --helm-set=image.useDigest=false \
-            --helm-set=image.tag=${SHA} \
-            --helm-set=operator.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/operator \
-            --helm-set=operator.image.suffix=-ci \
-            --helm-set=operator.image.tag=${SHA} \
-            --helm-set=operator.image.useDigest=false \
-            --helm-set=clustermesh.apiserver.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/clustermesh-apiserver-ci \
-            --helm-set=clustermesh.apiserver.image.tag=${SHA} \
-            --helm-set=clustermesh.apiserver.image.useDigest=false \
-            --helm-set=hubble.relay.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/hubble-relay-ci \
-            --helm-set=hubble.relay.image.tag=${SHA} \
+          CILIUM_INSTALL_DEFAULTS="${{ steps.default_vars.outputs.cilium_install_defaults }} \
             --helm-set=cni.chainingMode=portmap \
             --helm-set-string=kubeProxyReplacement=strict \
-            --helm-set=sessionAffinity=true \
-            --rollback=false \
-            --config monitor-aggregation=none \
-            --version="
-          HUBBLE_ENABLE_DEFAULTS="--chart-directory=install/kubernetes/cilium \
-            --relay-image=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/hubble-relay-ci:${SHA} \
-            --relay-version=${SHA}"
+            --helm-set=sessionAffinity=true"
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
-          echo hubble_enable_defaults=${HUBBLE_ENABLE_DEFAULTS} >> $GITHUB_OUTPUT
-          echo sha=${SHA} >> $GITHUB_OUTPUT
+          echo sha=${{ steps.default_vars.outputs.sha }} >> $GITHUB_OUTPUT
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@d610d6e2774e29aef9565bad935e3b4943d541af # v0.14.5
+        uses: cilium/cilium-cli@43678f6c7289bafa8850b9234d99581e0c5f8f09 # v0.15.10
         with:
           release-version: ${{ env.cilium_cli_version }}
           ci-version: ${{ env.cilium_cli_ci_version }}
 
       - name: Checkout code
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4.0.0
         with:
           ref: ${{ steps.vars.outputs.sha }}
           persist-credentials: false
@@ -178,6 +163,7 @@ jobs:
           done
 
       - name: Install Cilium
+        id: install-cilium
         run: |
           cilium install --wait ${{ steps.vars.outputs.cilium_install_defaults }}
 
@@ -221,7 +207,7 @@ jobs:
             --disable-log-dump=true
 
       - name: Post-test information gathering
-        if: ${{ !success() }}
+        if: ${{ !success() && steps.install-cilium.outcome != 'skipped' }}
         run: |
           kubectl get pods --all-namespaces -o wide
           cilium status
@@ -231,7 +217,7 @@ jobs:
 
       - name: Upload artifacts
         if: ${{ !success() }}
-        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+        uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32 # v3.1.3
         with:
           name: cilium-sysdumps
           path: cilium-sysdump-*.zip
@@ -239,15 +225,22 @@ jobs:
 
       - name: Upload cluster logs
         if: ${{ !success() }}
-        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+        uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32 # v3.1.3
         with:
           name: kind-logs
           path: ./_artifacts/logs
           retention-days: 5
 
-      - name: Upload Kubernetes e2e Junit Reports
+      - name: Upload Kubernetes e2e Junit Reports [junit]
         if: ${{ success() }}
-        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3
+        uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32 # v3
         with:
           name: kubernetes-e2e-junit
           path: './_artifacts/*.xml'
+
+      - name: Publish Test Results As GitHub Summary
+        if: ${{ always() }}
+        uses: aanm/junit2md@332ebf0fddd34e91b03a832cfafaa826306558f9 # v0.0.3
+        with:
+          junit-directory: "_artifacts"
+

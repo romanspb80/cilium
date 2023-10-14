@@ -4,8 +4,8 @@
 package endpoint
 
 import (
-	"fmt"
 	"net/netip"
+	"strconv"
 
 	"github.com/sirupsen/logrus"
 
@@ -38,7 +38,6 @@ type epInfoCache struct {
 	requireEgressProg                      bool
 	requireRouting                         bool
 	requireEndpointRoute                   bool
-	disableSIPVerification                 bool
 	policyVerdictLogFilter                 uint32
 	cidr4PrefixLengths, cidr6PrefixLengths []int
 	options                                *option.IntOptions
@@ -73,7 +72,6 @@ func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
 		requireEgressProg:      e.RequireEgressProg(),
 		requireRouting:         e.RequireRouting(),
 		requireEndpointRoute:   e.RequireEndpointRoute(),
-		disableSIPVerification: e.DisableSIPVerification(),
 		policyVerdictLogFilter: e.GetPolicyVerdictLogFilter(),
 		cidr4PrefixLengths:     cidr4,
 		cidr6PrefixLengths:     cidr6,
@@ -107,7 +105,7 @@ func (ep *epInfoCache) GetID() uint64 {
 
 // StringID returns the endpoint's ID in a string.
 func (ep *epInfoCache) StringID() string {
-	return fmt.Sprintf("%d", ep.id)
+	return strconv.FormatUint(ep.id, 10)
 }
 
 // GetIdentity returns the security identity of the endpoint.
@@ -172,12 +170,6 @@ func (ep *epInfoCache) RequireRouting() bool {
 // RequireEndpointRoute returns if the endpoint wants a per endpoint route
 func (ep *epInfoCache) RequireEndpointRoute() bool {
 	return ep.requireEndpointRoute
-}
-
-// DisableSIPVerification returns true if the endpoint wants to skip
-// srcIP verification
-func (ep *epInfoCache) DisableSIPVerification() bool {
-	return ep.disableSIPVerification
 }
 
 func (ep *epInfoCache) GetPolicyVerdictLogFilter() uint32 {

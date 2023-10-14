@@ -22,6 +22,7 @@ import (
 	cidrlabels "github.com/cilium/cilium/pkg/labels/cidr"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 )
 
@@ -31,6 +32,8 @@ var (
 	ErrLocalIdentityAllocatorUninitialized = errors.New("local identity allocator uninitialized")
 
 	LabelInjectorName = "ipcache-inject-labels"
+
+	injectLabelsControllerGroup = controller.NewGroup("ipcache-inject-labels")
 )
 
 // metadata contains the ipcache metadata. Mainily it holds a map which maps IP
@@ -78,12 +81,22 @@ type metadata struct {
 	// generate updates into the ipcache, policy engine and datapath.
 	queuedChangesMU lock.Mutex
 	queuedPrefixes  map[netip.Prefix]struct{}
+
+	// reservedHostLock protects the localHostLabels map. Holders must
+	// always take the metadata read lock first.
+	reservedHostLock lock.Mutex
+
+	// reservedHostLabels collects all labels that apply to the host identity.
+	// see updateLocalHostLabels() for more info.
+	reservedHostLabels map[netip.Prefix]labels.Labels
 }
 
 func newMetadata() *metadata {
 	return &metadata{
 		m:              make(map[netip.Prefix]PrefixInfo),
 		queuedPrefixes: make(map[netip.Prefix]struct{}),
+
+		reservedHostLabels: make(map[netip.Prefix]labels.Labels),
 	}
 }
 
@@ -171,7 +184,7 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 		return modifiedPrefixes, ErrLocalIdentityAllocatorUninitialized
 	}
 
-	if !ipc.cacheStatus.Synchronized() {
+	if !ipc.Configuration.CacheStatus.Synchronized() {
 		return modifiedPrefixes, errors.New("k8s cache not fully synced")
 	}
 
@@ -203,14 +216,13 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 		oldID, entryExists := ipc.LookupByIP(pstr)
 		oldTunnelIP, oldEncryptionKey := ipc.GetHostIPCache(pstr)
 		prefixInfo := ipc.metadata.getLocked(prefix)
+		var newID *identity.Identity
 		if prefixInfo == nil {
 			if !entryExists {
 				// Already deleted, no new metadata to associate
 				continue
 			} // else continue below to remove the old entry
 		} else {
-			var newID *identity.Identity
-
 			// Insert to propagate the updated set of labels after removal.
 			newID, _, err = ipc.resolveIdentity(ctx, prefix, prefixInfo, identity.InvalidIdentity)
 			if err != nil {
@@ -272,8 +284,28 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 			// iteration of the loop, then we must balance the
 			// allocation from the prior InjectLabels() call by
 			// releasing the previous reference.
-			previouslyAllocatedIdentities[prefix] = oldID
-
+			entry, entryToBeReplaced := entriesToReplace[prefix]
+			if !oldID.createdFromMetadata && entryToBeReplaced {
+				// If the previous ipcache entry for the prefix
+				// was not managed by this function, then the
+				// previous ipcache user to inject the IPCache
+				// entry retains its own reference to the
+				// Security Identity. Given that this function
+				// is going to assume responsibility for the
+				// IPCache entry now, this path must retain its
+				// own reference to the Security Identity to
+				// ensure that if the other owner ever releases
+				// their reference, this reference stays live.
+				if option.Config.Debug {
+					log.WithFields(logrus.Fields{
+						logfields.Prefix:      prefix,
+						logfields.OldIdentity: oldID.ID,
+						logfields.Identity:    entry.identity.ID,
+					}).Debug("Acquiring Identity reference")
+				}
+			} else {
+				previouslyAllocatedIdentities[prefix] = oldID
+			}
 			// If all associated metadata for this prefix has been removed,
 			// and the existing IPCache entry was never touched by any other
 			// subsystem using the old Upsert API, then we can safely remove
@@ -282,6 +314,25 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 				entriesToDelete[prefix] = oldID
 			}
 		}
+
+		// The reserved:host identity is special: the numeric ID is fixed,
+		// and the set of labels is mutable. Thus, whenever it changes,
+		// we must always update the SelectorCache (normally, this is elided
+		// when no changes are present).
+		if newID != nil && newID.ID == identity.ReservedIdentityHost {
+			idsToAdd[newID.ID] = newID.Labels.LabelArray()
+		}
+
+		// Again, more reserved:host bookkeeping: if this prefix is no longer ID 1 (because
+		// it is being deleted or changing IDs), we need to recompute the labels
+		// for reserved:host and push that to the SelectorCache
+		if entryExists && oldID.ID == identity.ReservedIdentityHost &&
+			(newID == nil || newID.ID != identity.ReservedIdentityHost) {
+
+			i := ipc.updateReservedHostLabels(prefix, nil)
+			idsToAdd[i.ID] = i.Labels.LabelArray()
+		}
+
 	}
 	// Don't hold lock while calling UpdateIdentities, as it will otherwise run into a deadlock
 	ipc.metadata.RUnlock()
@@ -404,14 +455,38 @@ func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, in
 	}
 
 	lbls := info.ToLabels()
-	if lbls.Has(labels.LabelWorld[labels.IDNameWorld]) &&
-		(lbls.Has(labels.LabelRemoteNode[labels.IDNameRemoteNode]) ||
-			lbls.Has(labels.LabelHost[labels.IDNameHost])) {
-		// If the prefix is associated with both world and (remote-node or
-		// host), then the latter (remote-node or host) take precedence to
-		// avoid allocating a CIDR identity for an entity within the cluster.
+
+	// If we are restoring an identity in the remote-node identity scope, we need to
+	// unconditionally add remote-node and cidr labels back. We do not need to check
+	// if CIDR selection for nodes is enabled here, as we explicitly check further down
+	// when we remove CIDR labels for identities that should not have them.
+	if restoredIdentity.Scope() == identity.IdentityScopeRemoteNode {
+		lbls.MergeLabels(labels.LabelRemoteNode)
+		cidrLabels := cidrlabels.GetCIDRLabels(prefix)
+		lbls.MergeLabels(cidrLabels)
+	}
+
+	// If we are restoring a host identity and policy-cidr-match-mode includes "nodes"
+	// then merge the CIDR-label.
+	if lbls.Has(labels.LabelHost[labels.IDNameHost]) &&
+		option.Config.PolicyCIDRMatchesNodes() {
+		cidrLabels := cidrlabels.GetCIDRLabels(prefix)
+		lbls.MergeLabels(cidrLabels)
+	}
+
+	// If the prefix is associated with the host or remote-node, then
+	// force-remove the world label.
+	if lbls.Has(labels.LabelRemoteNode[labels.IDNameRemoteNode]) ||
+		lbls.Has(labels.LabelHost[labels.IDNameHost]) {
 		n := lbls.Remove(labels.LabelWorld)
-		n = n.Remove(cidrlabels.GetCIDRLabels(prefix))
+		n = n.Remove(labels.LabelWorldIPv4)
+		n = n.Remove(labels.LabelWorldIPv6)
+
+		// It is not allowed for nodes to have CIDR labels, unless policy-cidr-match-mode
+		// includes "nodes". Then CIDR labels are required.
+		if !option.Config.PolicyCIDRMatchesNodes() {
+			n = n.Remove(cidrlabels.GetCIDRLabels(prefix))
+		}
 		lbls = n
 	}
 
@@ -431,8 +506,12 @@ func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, in
 		// for itself). For all other identities, we avoid modifying
 		// the labels at runtime and instead opt to allocate new
 		// identities below.
-		identity.AddReservedIdentityWithLabels(identity.ReservedIdentityHost, lbls)
-		return identity.LookupReservedIdentity(identity.ReservedIdentityHost), false, nil
+		//
+		// As an extra gotcha, we need need to merge all labels for all IPs
+		// that resolve to the reserved:host identity, otherwise we can
+		// flap identities labels depending on which prefix writes first. See GH-28259.
+		i := ipc.updateReservedHostLabels(prefix, lbls)
+		return i, false, nil
 	}
 
 	// If no other labels are associated with this IP, we assume that it's
@@ -456,10 +535,42 @@ func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, in
 	// which could theoretically fail if we ever allocate a very large
 	// number of identities.
 	id, isNew, err := ipc.IdentityAllocator.AllocateIdentity(ctx, lbls, false, restoredIdentity)
-	if lbls.Has(labels.LabelWorld[labels.IDNameWorld]) {
+	if lbls.Has(labels.LabelWorld[labels.IDNameWorld]) ||
+		lbls.Has(labels.LabelWorldIPv4[labels.IDNameWorldIPv4]) ||
+		lbls.Has(labels.LabelWorldIPv6[labels.IDNameWorldIPv6]) {
 		id.CIDRLabel = labels.NewLabelsFromModel([]string{labels.LabelSourceCIDR + ":" + prefix.String()})
 	}
 	return id, isNew, err
+}
+
+// updateReservedHostLabels adds or removes labels that apply to the local host.
+// The `reserved:host` identity is special: the numeric identity is fixed
+// and the set of labels is mutable. (The datapath requires this.) So,
+// we need to determine all prefixes that have the `reserved:host` label and
+// capture their labels. Then, we must aggregate *all* labels from all prefixes and
+// update the labels that correspond to the `reserved:host` identity.
+//
+// This could be termed a meta-ipcache. The ipcache metadata layer aggregates
+// an arbitrary set of resources and labels to a prefix. Here, we are aggregating an arbitrary
+// set of prefixes and labels to an identity.
+func (ipc *IPCache) updateReservedHostLabels(prefix netip.Prefix, lbls labels.Labels) *identity.Identity {
+	ipc.metadata.reservedHostLock.Lock()
+	defer ipc.metadata.reservedHostLock.Unlock()
+	if lbls == nil {
+		delete(ipc.metadata.reservedHostLabels, prefix)
+	} else {
+		ipc.metadata.reservedHostLabels[prefix] = lbls
+	}
+
+	// aggregate all labels and update static identity
+	newLabels := labels.NewFrom(labels.LabelHost)
+	for _, l := range ipc.metadata.reservedHostLabels {
+		newLabels.MergeLabels(l)
+	}
+
+	log.WithField(logfields.Labels, newLabels).Debug("Merged labels for reserved:host identity")
+
+	return identity.AddReservedIdentityWithLabels(identity.ReservedIdentityHost, newLabels)
 }
 
 // RemoveLabelsExcluded removes the given labels from all IPs inside the IDMD
@@ -561,6 +672,7 @@ func (ipc *IPCache) TriggerLabelInjection() {
 	ipc.UpdateController(
 		LabelInjectorName,
 		controller.ControllerParams{
+			Group:   injectLabelsControllerGroup,
 			Context: ipc.Configuration.Context,
 			DoFunc: func(ctx context.Context) error {
 				var err error

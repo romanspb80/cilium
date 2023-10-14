@@ -12,13 +12,14 @@ import (
 	"time"
 
 	. "github.com/cilium/checkmate"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spf13/cobra"
 
 	"github.com/cilium/cilium/api/v1/models"
 	cnicell "github.com/cilium/cilium/daemon/cmd/cni"
 	fakecni "github.com/cilium/cilium/daemon/cmd/cni/fake"
 	"github.com/cilium/cilium/pkg/controller"
 	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
+	"github.com/cilium/cilium/pkg/datapath/tables"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/envoy"
@@ -26,12 +27,15 @@ import (
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/hive/cell"
+	"github.com/cilium/cilium/pkg/hive/job"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/maps/authmap"
 	fakeauthmap "github.com/cilium/cilium/pkg/maps/authmap/fake"
+	ctmapgc "github.com/cilium/cilium/pkg/maps/ctmap/gc"
 	"github.com/cilium/cilium/pkg/maps/egressmap"
 	"github.com/cilium/cilium/pkg/maps/signalmap"
 	fakesignalmap "github.com/cilium/cilium/pkg/maps/signalmap/fake"
@@ -42,6 +46,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/promise"
 	"github.com/cilium/cilium/pkg/proxy"
+	"github.com/cilium/cilium/pkg/statedb"
 	"github.com/cilium/cilium/pkg/testutils"
 	"github.com/cilium/cilium/pkg/types"
 )
@@ -55,8 +60,6 @@ type DaemonSuite struct {
 	// as returned by policy.GetPolicyEnabled().
 	oldPolicyEnabled string
 
-	kvstoreInit bool
-
 	// Owners interface mock
 	OnGetPolicyRepository  func() *policy.Repository
 	OnGetNamedPorts        func() (npm types.NamedPortMultiMap)
@@ -64,12 +67,9 @@ type DaemonSuite struct {
 	OnGetCompilationLock   func() *lock.RWMutex
 	OnSendNotification     func(typ monitorAPI.AgentNotifyMessage) error
 	OnGetCIDRPrefixLengths func() ([]int, []int)
-
-	// Metrics
-	collectors []prometheus.Collector
 }
 
-func setupTestDirectories() {
+func setupTestDirectories() string {
 	tempRunDir, err := os.MkdirTemp("", "cilium-test-run")
 	if err != nil {
 		panic("TempDir() failed.")
@@ -80,14 +80,13 @@ func setupTestDirectories() {
 		panic("Mkdir failed")
 	}
 
-	option.Config.RunDir = tempRunDir
-	option.Config.StateDir = tempRunDir
-
 	socketDir := envoy.GetSocketDir(tempRunDir)
 	err = os.MkdirAll(socketDir, 0700)
 	if err != nil {
 		panic("creating envoy socket directory failed")
 	}
+
+	return tempRunDir
 }
 
 func TestMain(m *testing.M) {
@@ -99,9 +98,30 @@ func TestMain(m *testing.M) {
 
 	proxy.DefaultDNSProxy = fqdnproxy.MockFQDNProxy{}
 
+	time.Local = time.UTC
+
+	os.Exit(m.Run())
+}
+
+type dummyEpSyncher struct{}
+
+func (epSync *dummyEpSyncher) RunK8sCiliumEndpointSync(e *endpoint.Endpoint, conf endpoint.EndpointStatusConfiguration) {
+}
+
+func (epSync *dummyEpSyncher) DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint) {
+}
+
+func (ds *DaemonSuite) SetUpSuite(c *C) {
+	testutils.IntegrationTest(c)
+}
+
+func (s *DaemonSuite) setupConfigOptions() {
 	// Set up all configuration options which are global to the entire test
 	// run.
-	option.Config.Populate(Vp)
+	mockCmd := &cobra.Command{}
+	s.hive.RegisterFlags(mockCmd.Flags())
+	InitGlobalFlags(mockCmd, s.hive.Viper())
+	option.Config.Populate(s.hive.Viper())
 	option.Config.IdentityAllocationMode = option.IdentityAllocationModeKVstore
 	option.Config.DryMode = true
 	option.Config.Opts = option.NewIntOptions(&option.DaemonMutableOptionLibrary)
@@ -121,40 +141,11 @@ func TestMain(m *testing.M) {
 	// Disable the replacement, as its initialization function execs bpftool
 	// which requires root privileges. This would require marking the test suite
 	// as privileged.
-	option.Config.KubeProxyReplacement = option.KubeProxyReplacementDisabled
-
-	time.Local = time.UTC
-
-	os.Exit(m.Run())
-}
-
-type dummyEpSyncher struct{}
-
-func (epSync *dummyEpSyncher) RunK8sCiliumEndpointSync(e *endpoint.Endpoint, conf endpoint.EndpointStatusConfiguration) {
-}
-
-func (epSync *dummyEpSyncher) DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint) {
-}
-
-func (ds *DaemonSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
-
-	// Register metrics once before running the suite
-	_, ds.collectors = metrics.CreateConfiguration([]string{"cilium_endpoint_state"})
-	metrics.MustRegister(ds.collectors...)
-}
-
-func (ds *DaemonSuite) TearDownSuite(c *C) {
-	// Unregister the metrics after the suite has finished
-	for _, c := range ds.collectors {
-		metrics.Unregister(c)
-	}
+	option.Config.KubeProxyReplacement = option.KubeProxyReplacementFalse
 }
 
 func (ds *DaemonSuite) SetUpTest(c *C) {
 	ctx := context.Background()
-
-	setupTestDirectories()
 
 	ds.oldPolicyEnabled = policy.GetPolicyEnabled()
 	policy.SetPolicyEnabled(option.DefaultEnforcement)
@@ -168,18 +159,33 @@ func (ds *DaemonSuite) SetUpTest(c *C) {
 				return cs
 			},
 			func() datapath.Datapath { return fakeDatapath.NewDatapath() },
+			func(dp datapath.Datapath) datapath.NodeIDHandler { return dp.NodeIDs() },
 			func() *option.DaemonConfig { return option.Config },
 			func() cnicell.CNIConfigManager { return &fakecni.FakeCNIConfigManager{} },
 			func() signalmap.Map { return fakesignalmap.NewFakeSignalMap([][]byte{}, time.Second) },
 			func() authmap.Map { return fakeauthmap.NewFakeAuthMap() },
 			func() egressmap.PolicyMap { return nil },
+			func() ctmapgc.Enabler { return ctmapgc.NewFake() },
 		),
 		monitorAgent.Cell,
 		ControlPlane,
+		statedb.Cell,
+		tables.Cell,
+		job.Cell,
+		metrics.Cell,
+		store.Cell,
 		cell.Invoke(func(p promise.Promise[*Daemon]) {
 			daemonPromise = p
 		}),
 	)
+
+	// bootstrap global config
+	ds.setupConfigOptions()
+
+	// create temporary test directories and update global config accordingly
+	testRunDir := setupTestDirectories()
+	option.Config.RunDir = testRunDir
+	option.Config.StateDir = testRunDir
 
 	err := ds.hive.Start(ctx)
 	c.Assert(err, IsNil)
@@ -217,11 +223,6 @@ func (ds *DaemonSuite) TearDownTest(c *C) {
 		os.RemoveAll(option.Config.RunDir)
 	}
 
-	if ds.kvstoreInit {
-		kvstore.Client().DeletePrefix(ctx, kvstore.OperationalPath)
-		kvstore.Client().DeletePrefix(ctx, kvstore.BaseKeyPrefix)
-	}
-
 	// Restore the policy enforcement mode.
 	policy.SetPolicyEnabled(ds.oldPolicyEnabled)
 
@@ -238,13 +239,11 @@ type DaemonEtcdSuite struct {
 var _ = Suite(&DaemonEtcdSuite{})
 
 func (e *DaemonEtcdSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
-
-	kvstore.SetupDummy("etcd")
-	e.DaemonSuite.kvstoreInit = true
+	testutils.IntegrationTest(c)
 }
 
 func (e *DaemonEtcdSuite) SetUpTest(c *C) {
+	kvstore.SetupDummy(c, "etcd")
 	e.DaemonSuite.SetUpTest(c)
 }
 
@@ -259,13 +258,11 @@ type DaemonConsulSuite struct {
 var _ = Suite(&DaemonConsulSuite{})
 
 func (e *DaemonConsulSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
-
-	kvstore.SetupDummy("consul")
-	e.DaemonSuite.kvstoreInit = true
+	testutils.IntegrationTest(c)
 }
 
 func (e *DaemonConsulSuite) SetUpTest(c *C) {
+	kvstore.SetupDummy(c, "consul")
 	e.DaemonSuite.SetUpTest(c)
 }
 

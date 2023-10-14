@@ -4,6 +4,10 @@ kind: Deployment
 metadata:
   name: hubble-relay
   namespace: {{ .Release.Namespace }}
+  {{- with .Values.hubble.relay.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     k8s-app: hubble-relay
     app.kubernetes.io/name: hubble-relay
@@ -143,7 +147,7 @@ spec:
                 - key: ca.crt
                   path: hubble-server-ca.crt
           {{- else }}
-          - configMap:
+          - {{ .Values.tls.caBundle.useSecret | ternary "secret" "configMap" }}:
               name: {{ .Values.tls.caBundle.name }}
               items:
                 - key: {{ .Values.tls.caBundle.key }}

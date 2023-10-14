@@ -103,7 +103,7 @@ func NewHTTPListener(name string, ciliumSecretNamespace string, tls map[model.TL
 	var filterChains []*envoy_config_listener.FilterChain
 
 	insecureHttpConnectionManagerName := fmt.Sprintf("%s-insecure", name)
-	insecureHttpConnectionManager, err := NewHTTPConnectionManager(insecureHttpConnectionManagerName, insecureHttpConnectionManagerName)
+	insecureHttpConnectionManager, err := NewHTTPConnectionManager(insecureHttpConnectionManagerName, insecureHttpConnectionManagerName, WithXffNumTrustedHops())
 	if err != nil {
 		return ciliumv2.XDSResource{}, err
 	}
@@ -122,7 +122,7 @@ func NewHTTPListener(name string, ciliumSecretNamespace string, tls map[model.TL
 
 	for secret, hostNames := range tls {
 		secureHttpConnectionManagerName := fmt.Sprintf("%s-secure", name)
-		secureHttpConnectionManager, err := NewHTTPConnectionManager(secureHttpConnectionManagerName, secureHttpConnectionManagerName)
+		secureHttpConnectionManager, err := NewHTTPConnectionManager(secureHttpConnectionManagerName, secureHttpConnectionManagerName, WithXffNumTrustedHops())
 		if err != nil {
 			return ciliumv2.XDSResource{}, err
 		}
@@ -133,10 +133,7 @@ func NewHTTPListener(name string, ciliumSecretNamespace string, tls map[model.TL
 		}
 
 		filterChains = append(filterChains, &envoy_config_listener.FilterChain{
-			FilterChainMatch: &envoy_config_listener.FilterChainMatch{
-				ServerNames:       slices.SortedUnique(hostNames),
-				TransportProtocol: tlsTransportProtocol,
-			},
+			FilterChainMatch: toFilterChainMatch(hostNames),
 			Filters: []*envoy_config_listener.Filter{
 				{
 					Name: httpConnectionManagerType,
@@ -197,10 +194,7 @@ func NewSNIListener(name string, backendsForHost map[string][]string, mutatorFun
 
 	for backed, hostNames := range backendsForHost {
 		filterChains = append(filterChains, &envoy_config_listener.FilterChain{
-			FilterChainMatch: &envoy_config_listener.FilterChainMatch{
-				ServerNames:       slices.SortedUnique(hostNames),
-				TransportProtocol: tlsTransportProtocol,
-			},
+			FilterChainMatch: toFilterChainMatch(hostNames),
 			Filters: []*envoy_config_listener.Filter{
 				{
 					Name: tcpProxyType,
@@ -256,24 +250,6 @@ func newTransportSocket(ciliumSecretNamespace string, tls []model.TLSSecret) (*e
 	for k := range tlsMap {
 		tlsSdsConfig = append(tlsSdsConfig, &envoy_extensions_transport_sockets_tls_v3.SdsSecretConfig{
 			Name: k,
-			SdsConfig: &envoy_config_core_v3.ConfigSource{
-				ConfigSourceSpecifier: &envoy_config_core_v3.ConfigSource_ApiConfigSource{
-					ApiConfigSource: &envoy_config_core_v3.ApiConfigSource{
-						ApiType:             envoy_config_core_v3.ApiConfigSource_GRPC,
-						TransportApiVersion: envoy_config_core_v3.ApiVersion_V3,
-						GrpcServices: []*envoy_config_core_v3.GrpcService{
-							{
-								TargetSpecifier: &envoy_config_core_v3.GrpcService_EnvoyGrpc_{
-									EnvoyGrpc: &envoy_config_core_v3.GrpcService_EnvoyGrpc{
-										ClusterName: envoy.CiliumXDSClusterName,
-									},
-								},
-							},
-						},
-					},
-				},
-				ResourceApiVersion: envoy_config_core_v3.ApiVersion_V3,
-			},
 		})
 	}
 
@@ -297,4 +273,16 @@ func newTransportSocket(ciliumSecretNamespace string, tls []model.TLSSecret) (*e
 			},
 		},
 	}, nil
+}
+
+func toFilterChainMatch(hostNames []string) *envoy_config_listener.FilterChainMatch {
+	res := &envoy_config_listener.FilterChainMatch{
+		TransportProtocol: tlsTransportProtocol,
+	}
+	// ServerNames must be sorted and unique, however, envoy don't support "*" as a server name
+	serverNames := slices.SortedUnique(hostNames)
+	if len(serverNames) > 1 || (len(serverNames) == 1 && serverNames[0] != "*") {
+		res.ServerNames = serverNames
+	}
+	return res
 }

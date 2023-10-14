@@ -59,7 +59,8 @@ const (
 	BPF_SK_REUSEPORT_SELECT_OR_MIGRATE AttachType = 40
 	BPF_PERF_EVENT                     AttachType = 41
 	BPF_TRACE_KPROBE_MULTI             AttachType = 42
-	__MAX_BPF_ATTACH_TYPE              AttachType = 43
+	BPF_LSM_CGROUP                     AttachType = 43
+	__MAX_BPF_ATTACH_TYPE              AttachType = 44
 )
 
 type Cmd uint32
@@ -301,7 +302,23 @@ const (
 	BPF_FUNC_copy_from_user_task            FunctionId = 191
 	BPF_FUNC_skb_set_tstamp                 FunctionId = 192
 	BPF_FUNC_ima_file_hash                  FunctionId = 193
-	__BPF_FUNC_MAX_ID                       FunctionId = 194
+	BPF_FUNC_kptr_xchg                      FunctionId = 194
+	BPF_FUNC_map_lookup_percpu_elem         FunctionId = 195
+	BPF_FUNC_skc_to_mptcp_sock              FunctionId = 196
+	BPF_FUNC_dynptr_from_mem                FunctionId = 197
+	BPF_FUNC_ringbuf_reserve_dynptr         FunctionId = 198
+	BPF_FUNC_ringbuf_submit_dynptr          FunctionId = 199
+	BPF_FUNC_ringbuf_discard_dynptr         FunctionId = 200
+	BPF_FUNC_dynptr_read                    FunctionId = 201
+	BPF_FUNC_dynptr_write                   FunctionId = 202
+	BPF_FUNC_dynptr_data                    FunctionId = 203
+	BPF_FUNC_tcp_raw_gen_syncookie_ipv4     FunctionId = 204
+	BPF_FUNC_tcp_raw_gen_syncookie_ipv6     FunctionId = 205
+	BPF_FUNC_tcp_raw_check_syncookie_ipv4   FunctionId = 206
+	BPF_FUNC_tcp_raw_check_syncookie_ipv6   FunctionId = 207
+	BPF_FUNC_ktime_get_tai_ns               FunctionId = 208
+	BPF_FUNC_user_ringbuf_drain             FunctionId = 209
+	__BPF_FUNC_MAX_ID                       FunctionId = 210
 )
 
 type HdrStartOff uint32
@@ -323,7 +340,8 @@ const (
 	BPF_LINK_TYPE_XDP            LinkType = 6
 	BPF_LINK_TYPE_PERF_EVENT     LinkType = 7
 	BPF_LINK_TYPE_KPROBE_MULTI   LinkType = 8
-	MAX_BPF_LINK_TYPE            LinkType = 9
+	BPF_LINK_TYPE_STRUCT_OPS     LinkType = 9
+	MAX_BPF_LINK_TYPE            LinkType = 10
 )
 
 type MapType uint32
@@ -360,6 +378,7 @@ const (
 	BPF_MAP_TYPE_INODE_STORAGE         MapType = 28
 	BPF_MAP_TYPE_TASK_STORAGE          MapType = 29
 	BPF_MAP_TYPE_BLOOM_FILTER          MapType = 30
+	BPF_MAP_TYPE_USER_RINGBUF          MapType = 31
 )
 
 type ProgType uint32
@@ -402,10 +421,11 @@ const (
 type RetCode uint32
 
 const (
-	BPF_OK          RetCode = 0
-	BPF_DROP        RetCode = 2
-	BPF_REDIRECT    RetCode = 7
-	BPF_LWT_REROUTE RetCode = 128
+	BPF_OK                      RetCode = 0
+	BPF_DROP                    RetCode = 2
+	BPF_REDIRECT                RetCode = 7
+	BPF_LWT_REROUTE             RetCode = 128
+	BPF_FLOW_DISSECTOR_CONTINUE RetCode = 129
 )
 
 type SkAction uint32
@@ -465,7 +485,7 @@ type LinkInfo struct {
 	Id     LinkID
 	ProgId uint32
 	_      [4]byte
-	Extra  [16]uint8
+	Extra  [32]uint8
 }
 
 type MapInfo struct {
@@ -477,12 +497,12 @@ type MapInfo struct {
 	MapFlags              MapFlags
 	Name                  ObjName
 	Ifindex               uint32
-	BtfVmlinuxValueTypeId uint32
+	BtfVmlinuxValueTypeId TypeID
 	NetnsDev              uint64
 	NetnsIno              uint64
 	BtfId                 uint32
-	BtfKeyTypeId          uint32
-	BtfValueTypeId        uint32
+	BtfKeyTypeId          TypeID
+	BtfValueTypeId        TypeID
 	_                     [4]byte
 	MapExtra              uint64
 }
@@ -508,12 +528,12 @@ type ProgInfo struct {
 	NrJitedFuncLens      uint32
 	JitedKsyms           uint64
 	JitedFuncLens        uint64
-	BtfId                uint32
+	BtfId                BTFID
 	FuncInfoRecSize      uint32
-	FuncInfo             uint64
+	FuncInfo             Pointer
 	NrFuncInfo           uint32
 	NrLineInfo           uint32
-	LineInfo             uint64
+	LineInfo             Pointer
 	JitedLineInfo        uint64
 	NrJitedLineInfo      uint32
 	LineInfoRecSize      uint32
@@ -524,6 +544,8 @@ type ProgInfo struct {
 	RunCnt               uint64
 	RecursionMisses      uint64
 	VerifiedInsns        uint32
+	AttachBtfObjId       BTFID
+	AttachBtfId          TypeID
 	_                    [4]byte
 }
 
@@ -616,7 +638,7 @@ type LinkCreateAttr struct {
 	TargetFd    uint32
 	AttachType  AttachType
 	Flags       uint32
-	TargetBtfId uint32
+	TargetBtfId TypeID
 	_           [28]byte
 }
 
@@ -683,6 +705,25 @@ func LinkCreatePerfEvent(attr *LinkCreatePerfEventAttr) (*FD, error) {
 	return NewFD(int(fd))
 }
 
+type LinkCreateTracingAttr struct {
+	ProgFd      uint32
+	TargetFd    uint32
+	AttachType  AttachType
+	Flags       uint32
+	TargetBtfId BTFID
+	_           [4]byte
+	Cookie      uint64
+	_           [16]byte
+}
+
+func LinkCreateTracing(attr *LinkCreateTracingAttr) (*FD, error) {
+	fd, err := BPF(BPF_LINK_CREATE, unsafe.Pointer(attr), unsafe.Sizeof(*attr))
+	if err != nil {
+		return nil, err
+	}
+	return NewFD(int(fd))
+}
+
 type LinkUpdateAttr struct {
 	LinkFd    uint32
 	NewProgFd uint32
@@ -706,9 +747,9 @@ type MapCreateAttr struct {
 	MapName               ObjName
 	MapIfindex            uint32
 	BtfFd                 uint32
-	BtfKeyTypeId          uint32
-	BtfValueTypeId        uint32
-	BtfVmlinuxValueTypeId uint32
+	BtfKeyTypeId          TypeID
+	BtfValueTypeId        TypeID
+	BtfVmlinuxValueTypeId TypeID
 	MapExtra              uint64
 }
 
@@ -986,7 +1027,7 @@ type ProgLoadAttr struct {
 	LineInfoRecSize    uint32
 	LineInfo           Pointer
 	LineInfoCnt        uint32
-	AttachBtfId        uint32
+	AttachBtfId        TypeID
 	AttachBtfObjFd     uint32
 	CoreReloCnt        uint32
 	FdArray            Pointer
@@ -1004,13 +1045,14 @@ func ProgLoad(attr *ProgLoadAttr) (*FD, error) {
 }
 
 type ProgQueryAttr struct {
-	TargetFd    uint32
-	AttachType  AttachType
-	QueryFlags  uint32
-	AttachFlags uint32
-	ProgIds     Pointer
-	ProgCount   uint32
-	_           [4]byte
+	TargetFd        uint32
+	AttachType      AttachType
+	QueryFlags      uint32
+	AttachFlags     uint32
+	ProgIds         Pointer
+	ProgCount       uint32
+	_               [4]byte
+	ProgAttachFlags uint64
 }
 
 func ProgQuery(attr *ProgQueryAttr) error {
@@ -1081,7 +1123,7 @@ type RawTracepointLinkInfo struct {
 type TracingLinkInfo struct {
 	AttachType  AttachType
 	TargetObjId uint32
-	TargetBtfId uint32
+	TargetBtfId TypeID
 }
 
 type XDPLinkInfo struct{ Ifindex uint32 }

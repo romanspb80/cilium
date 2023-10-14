@@ -94,6 +94,18 @@ Users (Alphabetically)
       U: Hubble for Visibility, Cilium as Mesh between Services
       L: https://www.ayedo.de/
 
+    * N: Back Market
+      D: Back Market is using Cilium as CNI in all their clusters and environments (kOps + EKS in AWS)
+      U: CNI, Network Policies, Transparent Encryption (WG), Hubble
+      Q: @nitrikx
+      L: https://www.backmarket.com/
+
+    * N: Berops
+      D: Cilium is used as a CNI plug-in in our open-source multi-cloud and hybrid-cloud Kubernetes platform - Claudie
+      U: CNI, Network Policies, Hubble
+      Q: @Bernard Halas
+      L: https://github.com/berops/claudie
+
     * N: ByteDance
       D: ByteDance is using Cilium as CNI plug-in for self-hosted Kubernetes.
       U: CNI, Networking
@@ -173,6 +185,11 @@ Users (Alphabetically)
       U: Networking, Security, Hubble UI for network visibility
       L: https://github.com/deckhouse/deckhouse
 
+    * N: Deezer
+      D: Deezer is using Cilium as CNI for all our on-prem clusters for its performance and security. We plan to leverage BGP features as well soon
+      U: CNI, Hubble, kube-proxy replacement, eBPF
+      L: https://github.com/deezer
+
     * N: DigitalOcean
       D: DigitalOcean is using Cilium as the CNI for Digital Ocean's managed Kubernetes Services (DOKS)
       U: Networking and network policy
@@ -183,7 +200,13 @@ Users (Alphabetically)
       U: Networking (CNI), Transparent Encryption (WG), 
       L: https://docs.edgeless.systems/constellation/architecture/networking
       Q: @m1ghtym0
- 
+
+    * N: Eficode
+      D: As a cloud-native and devops consulting firm, we have implemented Cilium on customer engagements
+      U: CNI, CiliumNetworkPolicy at L7, Hubble
+      L: https://eficode.com/
+      Q: @Andy Allred
+
     * N: Elastic Path
       D: Elastic Path is using Cilium in their CloudOps for Kubernetes production clusters
       U: CNI
@@ -240,6 +263,12 @@ Users (Alphabetically)
       U: Networking, network policy, and network visibility
       L: https://cloud.google.com/blog/products/containers-kubernetes/bringing-ebpf-and-cilium-to-google-kubernetes-engine
 
+    * N: G DATA CyberDefense AG
+      D: G DATA CyberDefense AG is using Cilium on our managed on premise clusters.
+      U: Networking, network policy, security, and network visibility
+      L: https://gdatasoftware.com
+      Q: @farodin91
+
     * N: IKEA IT AB
       D: IKEA IT AB is using Cilium for production and non-production environments (self-hosted, bare-metal, private cloud)
       U: Networking, CiliumclusterWideNetworkPolicy, CiliumNetworkPolicy, kube-proxy replacement, Hubble, Direct routing, egress gateway, hubble-otel, Multi Nic XDP, BGP advertisements, Bandwidth Manager, Service Load Balancing, Cluster Mesh
@@ -274,6 +303,11 @@ Users (Alphabetically)
       U: Networking, network policy, network visibility, cluster mesh
       Q: @Matthieu ANTOINE, @Carlos Castro, @Joao Coutinho (Slack)
 
+    * N: Keploy
+      D: Keploy is using the Cilium to capture the network traffic to perform E2E Testing.
+      U: Networking, network policy, Monitoring, E2E Testing
+      L: https://keploy.io/
+      
     * N: Kilo
       D: Cilium is a supported CNI for Kilo. When used together, Cilium + Kilo create a full mesh via WireGuard for Kubernetes in edge environments.
       U: CNI, Networking, Hubble, kube-proxy replacement, network policy
@@ -344,7 +378,12 @@ Users (Alphabetically)
       D: Meltwater is using Cilium in AWS on self-hosted multi-tenant k8s clusters as the CNI plugin
       U: ENI Networking, Encryption, Monitoring via Prometheus metrics & Hubble
       Q: @recollir, @dezmodue
-      
+
+    * N: Microsoft
+      D: Microsoft is using Cilium in "Azure CNI powered by Cilium" AKS (Azure Kubernetes Services) clusters
+      L: https://techcommunity.microsoft.com/t5/azure-networking-blog/azure-cni-powered-by-cilium-for-azure-kubernetes-service-aks/ba-p/3662341
+      Q: @tamilmani1989 @chandanAggarwal
+
     * N: Mobilab
       D: Mobilab uses Cilium as the CNI for its internal cloud
       U: CNI
@@ -388,8 +427,8 @@ Users (Alphabetically)
       U: Networking, network policy, hubble, observability
 
     * N: Palantir Technologies Inc.
-      D: Palantir is using Cilium as their main CNI plugin in AWS (self hosted k8s).
-      U: ENI networking, L3/L4 policies, FQDN based policy, FQDN filtering
+      D: Palantir is using Cilium as their main CNI plugin in all major cloud providers [AWS/Azure/GCP] (self hosted k8s).
+      U: ENI networking, L3/L4 policies, FQDN based policy, FQDN filtering, IPSec
       Q: ungureanuvladvictor
     
     * N: Palark GmbH
@@ -409,6 +448,11 @@ Users (Alphabetically)
       U: Networking (CNI, IPAM, kube-proxy replacement, native routing), Network Security, Cluster Mesh, Load Balancing
       L: https://planetscale.com/
       Q: @dctrwatson
+
+    * N: plusserver Kubernetes Engine (PSKE)
+      D: PSKE uses Cilium for multiple scenarios, for examples for managed Kubernetes clusters provided with Gardener Project across AWS and OpenStack.
+      U: CNI , Overlay Network, Network Policies
+      L: https://www.plusserver.com/en/product/managed-kubernetes/, https://github.com/gardener/gardener-extension-networking-cilium
 
     * N: Polar Signals
       D: Polar Signals uses Cilium as the CNI on its GKE dataplane v2 based clusters.
@@ -477,6 +521,12 @@ Users (Alphabetically)
       L: https://sapian.com.co, https://arpagon.co/blog/k8s-edge
       Q: @arpagon
 
+    * N: Schenker AG
+      D: Land transportation unit of Schenker uses Cilium as default CNI in self-managed kubernetes clusters running in AWS
+      U: CNI, Monitoring, kube-proxy replacement
+      L: https://www.dbschenker.com/global
+      Q: @amirkkn
+
     * N: Seznam.cz
       D: Seznam.cz uses Cilium in multiple scenarios in on-prem DCs. At first as L4LB which loadbalances external traffic into k8s+openstack clusters then as CNI in multiple k8s and openstack clusters which are all connected in a clustermesh to enforce NetworkPolicies across pods/VMs.
       U: L4LB, L3/4 CNPs+CCNPs, KPR, Hubble, HostPolicy, Direct-routing, IPv4+IPv6, ClusterMesh
@@ -501,6 +551,12 @@ Users (Alphabetically)
       
     * N: SIGHUP
       D: SIGHUP integrated Cilium as a supported CNI for KFD (Kubernetes Fury Distribution), our enterprise-grade OSS reference architecture 
+      U: Available supported CNI
+      L: https://sighup.io, https://github.com/sighupio/fury-kubernetes-networking
+      Q: @jnardiello @nutellino
+
+    * N: SIGHUP
+      D: SIGHUP integrated Cilium as a supported CNI for KFD (Kubernetes Fury Distribution), our enterprise-grade OSS reference architecture
       U: Available supported CNI
       L: https://sighup.io, https://github.com/sighupio/fury-kubernetes-networking
       Q: @jnardiello @nutellino
@@ -568,6 +624,11 @@ Users (Alphabetically)
       L: https://teuto.net/managed-kubernetes
       Q: @cwrau
 
+    * N: Trendyol
+      D: Trendyol.com has recently implemented Cilium as the default CNI for its production Kubernetes clusters starting from version 1.26.
+      U: Networking, kube-proxy replacement, eBPF, Network Visibility with Hubble and Grafana, Local Redirect Policy
+      L: https://t.ly/FDCZK
+
     * N: T-Systems International
       D: TSI uses Cilium for it's Open Sovereign Cloud product, including as a CNI for Gardener-based Kubernetes clusters and bare-metal infrastructure managed by OnMetal.
       U: CNI, overlay network, NetworkPolicies
@@ -601,6 +662,11 @@ Users (Alphabetically)
       U: CNI (instead of amazon-vpc-cni-k8s), Hubble, Datadog Integration for Prometheus metrics
       Q: @liorrozen
       
+    * N: Twilio
+      D: Twilio Segment is using Cilium across their k8s-based compute platform
+      U: CNI, EKS direct routing, kube-proxy replacement, Hubble, CiliumNetworkPolicies
+      Q: @msaah
+      
     * N: ungleich
       D: ungleich is using Cilium as part of IPv6-only Kubernetes deployments.
       U: CNI, IPv6 only networking, BGP, eBPF
@@ -614,3 +680,8 @@ Users (Alphabetically)
     * N: Yahoo!
       D: Yahoo is using Cilium for L4 North-South Load Balancing for Kubernetes Services
       L: https://www.youtube.com/watch?v=-C86fBMcp5Q
+    
+    * N: ZeroHash 
+      D: Zero Hash is using Cilium as CNI for networking, security and monitoring features for Kubernetes clusters 
+      U: CNI/ENI Networking, Network policies, Hubble
+      Q: @eugenestarchenko

@@ -67,12 +67,9 @@ var ignoredELFPrefixes = []string{
 	"cilium_vtep_map",            // Global
 	"cilium_per_cluster_ct",      // Global
 	"cilium_world_cidrs4",        // Global
-	"from-container",             // Prog name
-	"to-container",               // Prog name
-	"from-netdev",                // Prog name
-	"from-host",                  // Prog name
-	"to-netdev",                  // Prog name
-	"to-host",                    // Prog name
+	"cilium_l2_responder_v4",     // Global
+	"tc",                         // Program Section
+	"xdp",                        // Program Section
 	".BTF",                       // Debug
 	".BTF.ext",                   // Debug
 	".debug_ranges",              // Debug
@@ -88,6 +85,8 @@ var ignoredELFPrefixes = []string{
 	// for which we set ETH_HLEN=0 during load time.
 	"ETH_HLEN",
 }
+
+var templateDirWatcherControllerGroup = controller.NewGroup("template-dir-watcher")
 
 // RestoreTemplates populates the object cache from templates on the filesystem
 // at the specified path.
@@ -139,6 +138,7 @@ func newObjectCache(c datapath.ConfigWriter, nodeCfg *datapath.LocalNodeConfigur
 	oc.Update(nodeCfg)
 	controller.NewManager().UpdateController("template-dir-watcher",
 		controller.ControllerParams{
+			Group:  templateDirWatcherControllerGroup,
 			DoFunc: oc.watchTemplatesDirectory,
 			// No run interval but needs to re-run on errors.
 		})
@@ -366,7 +366,7 @@ func (o *objectCache) watchTemplatesDirectory(ctx context.Context) error {
 			} else {
 				log.WithField("event", event).Debug("Ignoring template FS event")
 			}
-		case err, _ = <-templateWatcher.Errors:
+		case err = <-templateWatcher.Errors:
 			return err
 		case <-ctx.Done():
 			return ctx.Err()

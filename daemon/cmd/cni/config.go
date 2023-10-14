@@ -47,24 +47,32 @@ type cniConfigManager struct {
 // GetMTU returns the MTU as written in the CNI configuration file.
 // This is one way to override the node's MTU.
 func (c *cniConfigManager) GetMTU() int {
-	if c.config.ReadCNIConf == "" {
+	conf := c.GetCustomNetConf()
+	if conf == nil {
 		return 0
 	}
-
-	conf, err := cnitypes.ReadNetConf(c.config.ReadCNIConf)
-	if err != nil {
-		c.log.WithField("path", c.config.ReadCNIConf).WithError(err).Warnf("Failed to parse existing CNI configuration file")
-	}
-
-	if conf.MTU > 0 {
-		return conf.MTU
-	}
-	return 0
+	return conf.MTU
 }
 
 // GetChainingMode returns the configured chaining mode.
 func (c *cniConfigManager) GetChainingMode() string {
 	return c.config.CNIChainingMode
+}
+
+// GetCustomNetConf returns the parsed custom CNI configuration, if provided
+// (In other words, the value to --read-cni-conf).
+// Otherwise, returns nil.
+func (c *cniConfigManager) GetCustomNetConf() *cnitypes.NetConf {
+	if c.config.ReadCNIConf == "" {
+		return nil
+	}
+
+	conf, err := cnitypes.ReadNetConf(c.config.ReadCNIConf)
+	if err != nil {
+		c.log.WithField("path", c.config.ReadCNIConf).WithError(err).Warnf("Failed to parse existing CNI configuration file")
+		return nil
+	}
+	return conf
 }
 
 // cniConfigs are the default configurations, per chaining mode
@@ -141,6 +149,8 @@ const chainedCNIEntry = `
 
 const cniControllerName = "write-cni-file"
 
+var cniControllerGroup = controller.NewGroup("write-cni-file")
+
 // startCNIConfWriter starts the CNI configuration file manager.
 //
 // This has two responsibilities:
@@ -164,21 +174,27 @@ func (c *cniConfigManager) Start(hive.HookContext) error {
 		return nil
 	}
 
-	var err error
-
-	c.watcher, err = fsnotify.NewWatcher()
-	if err != nil {
-		c.log.Warnf("Failed to create watcher: %v", err)
-	} else {
-		if err := c.watcher.Add(c.cniConfDir); err != nil {
-			c.log.Warnf("Failed to watch CNI configuration directory %s: %v", c.cniConfDir, err)
-			c.watcher = nil
+	// Watch the CNI configuration directory, and regenerate CNI config
+	// if necessary.
+	// Don't watch for changes if cni-exclusive is false. This is to allow
+	// rewriting of the Cilium CNI configuration by another plugin (e.g. Istio).
+	if c.config.CNIExclusive {
+		var err error
+		c.watcher, err = fsnotify.NewWatcher()
+		if err != nil {
+			c.log.Warnf("Failed to create watcher: %v", err)
+		} else {
+			if err := c.watcher.Add(c.cniConfDir); err != nil {
+				c.log.Warnf("Failed to watch CNI configuration directory %s: %v", c.cniConfDir, err)
+				c.watcher = nil
+			}
 		}
 	}
 
 	// Install the CNI file controller
 	c.controller.UpdateController(cniControllerName,
 		controller.ControllerParams{
+			Group: cniControllerGroup,
 			DoFunc: func(ctx context.Context) error {
 				err := c.setupCNIConfFile()
 				if err != nil {
@@ -256,6 +272,11 @@ func (c *cniConfigManager) setupCNIConfFile() error {
 		}
 	}
 
+	err = ensureDirExists(c.cniConfDir)
+	if err != nil {
+		return fmt.Errorf("failed to create the dir %s of the CNI configuration file: %w", c.cniConfDir, err)
+	}
+
 	dest := path.Join(c.cniConfDir, c.cniConfFile)
 
 	// Check to see if existing file is the same; if so, do nothing
@@ -291,7 +312,7 @@ func (c *cniConfigManager) renderCNIConf() (cniConfig []byte, err error) {
 		}
 	} else {
 		c.log.Infof("Generating CNI configuration file with mode %s", c.config.CNIChainingMode)
-		tmpl := cniConfigs[c.config.CNIChainingMode]
+		tmpl := cniConfigs[strings.ToLower(c.config.CNIChainingMode)]
 		cniConfig = []byte(c.renderCNITemplate(tmpl))
 	}
 
@@ -448,4 +469,12 @@ func (c *cniConfigManager) findCNINetwork(wantNetwork string) ([]byte, error) {
 		return json.Marshal(rawConfigList)
 	}
 	return nil, fmt.Errorf("no matching CNI configurations found (will retry)")
+}
+
+func ensureDirExists(dir string) error {
+	err := os.MkdirAll(dir, os.ModePerm)
+	if err != nil && os.IsExist(err) {
+		return nil
+	}
+	return err
 }

@@ -19,7 +19,7 @@ import (
 	"time"
 
 	. "github.com/cilium/checkmate"
-	"github.com/miekg/dns"
+	"github.com/cilium/dns"
 	"golang.org/x/exp/maps"
 	"sigs.k8s.io/yaml"
 
@@ -28,7 +28,6 @@ import (
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
-	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
@@ -158,15 +157,15 @@ var (
 	testSelectorCache       = policy.NewSelectorCache(fakeAllocator, cacheAllocator.GetIdentityCache())
 	dummySelectorCacheUser  = &DummySelectorCacheUser{}
 	DstID1Selector          = api.NewESFromLabels(labels.ParseSelectLabel("k8s:Dst1=test"))
-	cachedDstID1Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, DstID1Selector)
+	cachedDstID1Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, nil, DstID1Selector)
 	DstID2Selector          = api.NewESFromLabels(labels.ParseSelectLabel("k8s:Dst2=test"))
-	cachedDstID2Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, DstID2Selector)
+	cachedDstID2Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, nil, DstID2Selector)
 	DstID3Selector          = api.NewESFromLabels(labels.ParseSelectLabel("k8s:Dst3=test"))
-	cachedDstID3Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, DstID3Selector)
+	cachedDstID3Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, nil, DstID3Selector)
 	DstID4Selector          = api.NewESFromLabels(labels.ParseSelectLabel("k8s:Dst4=test"))
-	cachedDstID4Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, DstID4Selector)
+	cachedDstID4Selector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, nil, DstID4Selector)
 
-	cachedWildcardSelector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, api.WildcardEndpointSelector)
+	cachedWildcardSelector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, nil, api.WildcardEndpointSelector)
 
 	epID1   = uint64(111)
 	epID2   = uint64(222)
@@ -194,9 +193,6 @@ func (s *DNSProxyTestSuite) SetUpTest(c *C) {
 	s.dnsServer = setupServer(c)
 	c.Assert(s.dnsServer, Not(IsNil), Commentf("unable to setup DNS server"))
 
-	option.Config.FQDNRegexCompileLRUSize = 1024
-	err := re.InitRegexCompileLRU(option.Config.FQDNRegexCompileLRUSize)
-	c.Assert(err, IsNil)
 	proxy, err := StartDNSProxy("", 0, true, 1000, // any address, any port, enable compression, max 1000 restore IPs
 		// LookupEPByIP
 		func(ip net.IP) (*endpoint.Endpoint, error) {
@@ -1096,7 +1092,11 @@ type selectorMock struct {
 	key string
 }
 
-func (t selectorMock) GetSelections() []identity.NumericIdentity {
+func (t selectorMock) GetSelections() identity.NumericIdentitySlice {
+	panic("implement me")
+}
+
+func (t selectorMock) GetMetadataLabels() labels.LabelArray {
 	panic("implement me")
 }
 
@@ -1124,9 +1124,7 @@ func Benchmark_perEPAllow_setPortRulesForID(b *testing.B) {
 		nMatchNames       = 600
 		everyNIsEqual     = 10
 		everyNHasWildcard = 20
-		cacheSize         = 128
 	)
-	re.InitRegexCompileLRU(cacheSize)
 	runtime.GC()
 	initialHeap := getMemStats().HeapInuse
 	rulesPerEP := make([]policy.L7DataMap, 0, nEPs)
@@ -1161,7 +1159,6 @@ func Benchmark_perEPAllow_setPortRulesForID(b *testing.B) {
 	b.StopTimer()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		re.InitRegexCompileLRU(cacheSize)
 		for epID := uint64(0); epID < nEPs; epID++ {
 			pea.setPortRulesForID(c, epID, 8053, nil)
 		}
@@ -1197,16 +1194,12 @@ func Benchmark_perEPAllow_setPortRulesForID(b *testing.B) {
 
 func Benchmark_perEPAllow_setPortRulesForID_large(b *testing.B) {
 	b.Skip()
-	cacheSize := 128
 	numEPs := uint64(20)
 	cnpFile := "testdata/cnps-large.yaml"
 
-	// init empty cache so old cache entries are correctly
-	// garbage collected.
-	re.InitRegexCompileLRU(cacheSize)
 	runtime.GC()
 	m := getMemStats()
-	fmt.Printf("Before Setup (N=%v,EPs=%d,cache=%d)\n", b.N, numEPs, cacheSize)
+	fmt.Printf("Before Setup (N=%v,EPs=%d)\n", b.N, numEPs)
 
 	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
 	fmt.Printf("\tHeapInuse = %v MiB", bToMb(m.HeapInuse))
@@ -1272,7 +1265,7 @@ func Benchmark_perEPAllow_setPortRulesForID_large(b *testing.B) {
 
 	runtime.GC()
 	m = getMemStats()
-	fmt.Printf("Before Test (N=%v,EPs=%d,cache=%d)\n", b.N, numEPs, cacheSize)
+	fmt.Printf("Before Test (N=%v,EPs=%d)\n", b.N, numEPs)
 
 	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
 	fmt.Printf("\tHeapInuse = %v MiB", bToMb(m.HeapInuse))
@@ -1300,7 +1293,7 @@ func Benchmark_perEPAllow_setPortRulesForID_large(b *testing.B) {
 	m = getMemStats()
 	// Explicitly keep a reference to "pea" to keep it on the heap
 	// so that we can measure it before it is garbage collected.
-	fmt.Printf("After Test (N=%v,EPs=%d,cache=%d)\n", b.N, len(pea), cacheSize)
+	fmt.Printf("After Test (N=%v,EPs=%d)\n", b.N, len(pea))
 	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
 	fmt.Printf("\tHeapInuse = %v MiB", bToMb(m.HeapInuse))
 	fmt.Printf("\tSys = %v MiB", bToMb(m.Sys))

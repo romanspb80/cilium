@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"go.uber.org/multierr"
 	"golang.org/x/exp/slices"
+	meta "k8s.io/apimachinery/pkg/api/meta"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
@@ -29,6 +29,7 @@ import (
 	cilium_client_v2alpha1 "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_core_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	slim_meta "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/api/meta"
 	slim_meta_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	client_typed_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned/typed/core/v1"
 	"github.com/cilium/cilium/pkg/option"
@@ -36,12 +37,12 @@ import (
 
 const (
 	// The condition added to services to indicate if a request for IPs could be satisfied or not
-	ciliumSvcRequestSatisfiedCondition = "io.cilium/lb-ipam-request-satisfied"
+	ciliumSvcRequestSatisfiedCondition = "cilium.io/IPAMRequestSatisfied"
 
-	ciliumPoolIPsTotalCondition     = "io.cilium/ips-total"
-	ciliumPoolIPsAvailableCondition = "io.cilium/ips-available"
-	ciliumPoolIPsUsedCondition      = "io.cilium/ips-used"
-	ciliumPoolConflict              = "io.cilium/conflict"
+	ciliumPoolIPsTotalCondition     = "cilium.io/IPsTotal"
+	ciliumPoolIPsAvailableCondition = "cilium.io/IPsAvailable"
+	ciliumPoolIPsUsedCondition      = "cilium.io/IPsUsed"
+	ciliumPoolConflict              = "cilium.io/PoolConflict"
 
 	// The annotation LB IPAM will look for when searching for requested IPs
 	ciliumSvcLBIPSAnnotation = "io.cilium/lb-ipam-ips"
@@ -69,7 +70,11 @@ func newLBIPAM(params LBIPAMParams) *LBIPAM {
 
 	var lbClasses []string
 	if params.DaemonConfig.EnableBGPControlPlane {
-		lbClasses = append(lbClasses, "io.cilium/bgp-control-plane")
+		lbClasses = append(lbClasses, cilium_api_v2alpha1.BGPLoadBalancerClass)
+	}
+
+	if params.DaemonConfig.EnableL2Announcements {
+		lbClasses = append(lbClasses, cilium_api_v2alpha1.L2AnnounceLoadBalancerClass)
 	}
 
 	jobGroup := params.JobRegistry.NewGroup(
@@ -91,6 +96,7 @@ func newLBIPAM(params LBIPAMParams) *LBIPAM {
 		ipv4Enabled:  option.Config.IPv4Enabled(),
 		ipv6Enabled:  option.Config.IPv6Enabled(),
 		jobGroup:     jobGroup,
+		metrics:      params.Metrics,
 	}
 
 	jobGroup.Add(
@@ -127,6 +133,8 @@ type LBIPAM struct {
 	serviceStore serviceStore
 
 	jobGroup job.Group
+
+	metrics *ipamMetrics
 
 	// Only used during testing.
 	initDoneCallbacks []func()
@@ -406,11 +414,7 @@ func (ipam *LBIPAM) handleUpsertService(ctx context.Context, svc *slim_core_v1.S
 
 		// Remove all ingress IPs
 		sv.Status.LoadBalancer.Ingress = nil
-		for i := len(sv.Status.Conditions) - 1; i >= 0; i-- {
-			if sv.Status.Conditions[i].Type == ciliumSvcRequestSatisfiedCondition {
-				sv.Status.Conditions = slices.Delete(sv.Status.Conditions, i, i+1)
-			}
-		}
+		slim_meta.RemoveStatusCondition(&sv.Status.Conditions, ciliumSvcRequestSatisfiedCondition)
 
 		err := ipam.patchSvcStatus(ctx, sv)
 		if err != nil {
@@ -468,7 +472,7 @@ func (ipam *LBIPAM) handleUpsertService(ctx context.Context, svc *slim_core_v1.S
 }
 
 func (ipam *LBIPAM) stripInvalidAllocations(sv *ServiceView) error {
-	var errors []error
+	var errs error
 	// Remove bad allocations which are no longer valid
 	for allocIdx := len(sv.AllocatedIPs) - 1; allocIdx >= 0; allocIdx-- {
 		alloc := sv.AllocatedIPs[allocIdx]
@@ -484,10 +488,7 @@ func (ipam *LBIPAM) stripInvalidAllocations(sv *ServiceView) error {
 		// If origin pool no longer exists, remove allocation
 		pool, found := ipam.pools[alloc.Origin.originPool]
 		if !found {
-			err := releaseAllocIP()
-			if err != nil {
-				errors = append(errors, err)
-			}
+			errs = errors.Join(errs, releaseAllocIP())
 			continue
 		}
 
@@ -495,15 +496,12 @@ func (ipam *LBIPAM) stripInvalidAllocations(sv *ServiceView) error {
 		if pool.Spec.ServiceSelector != nil {
 			selector, err := slim_meta_v1.LabelSelectorAsSelector(pool.Spec.ServiceSelector)
 			if err != nil {
-				errors = append(errors, fmt.Errorf("Making selector from pool '%s' label selector", pool.Name))
+				errs = errors.Join(errs, fmt.Errorf("Making selector from pool '%s' label selector", pool.Name))
 				continue
 			}
 
 			if !selector.Matches(sv.Labels) {
-				err := releaseAllocIP()
-				if err != nil {
-					errors = append(errors, err)
-				}
+				errs = errors.Join(errs, releaseAllocIP())
 				continue
 			}
 		}
@@ -519,10 +517,7 @@ func (ipam *LBIPAM) stripInvalidAllocations(sv *ServiceView) error {
 			}
 			// If allocated IP has not been requested, remove it
 			if !found {
-				err := releaseAllocIP()
-				if err != nil {
-					errors = append(errors, err)
-				}
+				errs = errors.Join(errs, releaseAllocIP())
 				continue
 			}
 		} else {
@@ -531,31 +526,20 @@ func (ipam *LBIPAM) stripInvalidAllocations(sv *ServiceView) error {
 			if isIPv6(alloc.IP) {
 				// Service has an IPv6 address, but its spec doesn't request it anymore, so take it away
 				if !sv.RequestedFamilies.IPv6 {
-					err := releaseAllocIP()
-					if err != nil {
-						errors = append(errors, err)
-					}
+					errs = errors.Join(errs, releaseAllocIP())
 					continue
 				}
 
 			} else {
 				// Service has an IPv4 address, but its spec doesn't request it anymore, so take it away
 				if !sv.RequestedFamilies.IPv4 {
-					err := releaseAllocIP()
-					if err != nil {
-						errors = append(errors, err)
-					}
+					errs = errors.Join(errs, releaseAllocIP())
 					continue
 				}
 			}
 		}
 	}
-
-	if len(errors) > 0 {
-		return multierr.Combine(errors...)
-	}
-
-	return nil
+	return errs
 }
 
 func (ipam *LBIPAM) stripOrImportIngresses(sv *ServiceView) (statusModified bool, err error) {
@@ -868,17 +852,15 @@ func (ipam *LBIPAM) setSVCSatisfiedCondition(
 		status = slim_meta_v1.ConditionTrue
 	}
 
-	for _, cond := range sv.Status.Conditions {
-		if cond.Type == ciliumSvcRequestSatisfiedCondition &&
-			cond.Status == status &&
-			cond.ObservedGeneration == sv.Generation &&
-			cond.Reason == reason &&
-			cond.Message == message {
-			return false
-		}
+	if cond := slim_meta.FindStatusCondition(sv.Status.Conditions, ciliumSvcRequestSatisfiedCondition); cond != nil &&
+		cond.Status == status &&
+		cond.ObservedGeneration == sv.Generation &&
+		cond.Reason == reason &&
+		cond.Message == message {
+		return false
 	}
 
-	sv.Status.Conditions = append(sv.Status.Conditions, slim_meta_v1.Condition{
+	slim_meta.SetStatusCondition(&sv.Status.Conditions, slim_meta_v1.Condition{
 		Type:               ciliumSvcRequestSatisfiedCondition,
 		Status:             status,
 		ObservedGeneration: sv.Generation,
@@ -1094,12 +1076,7 @@ func (ipam *LBIPAM) handleNewPool(ctx context.Context, pool *cilium_api_v2alpha1
 			return fmt.Errorf("Error parsing cidr '%s': %w", cidrBlock.Cidr, err)
 		}
 
-		lbRange, err := NewLBRange(cidr, pool)
-		if err != nil {
-			return fmt.Errorf("Error making LB Range for '%s': %w", cidrBlock.Cidr, err)
-		}
-
-		ipam.rangesStore.Add(lbRange)
+		ipam.rangesStore.Add(newLBRange(cidr, pool))
 	}
 
 	// Unmark new pools so they get a conflict: False condition set, otherwise kubectl will report a blank field.
@@ -1158,12 +1135,7 @@ func (ipam *LBIPAM) handlePoolModified(ctx context.Context, pool *cilium_api_v2a
 			continue
 		}
 
-		newRange, err := NewLBRange(&newCIDR, pool)
-		if err != nil {
-			return fmt.Errorf("Error while making new LB range for CIDR '%s': %w", newCIDR.String(), err)
-		}
-
-		ipam.rangesStore.Add(newRange)
+		ipam.rangesStore.Add(newLBRange(&newCIDR, pool))
 	}
 
 	existingRanges, _ = ipam.rangesStore.GetRangesForPool(pool.GetName())
@@ -1245,6 +1217,9 @@ func (ipam *LBIPAM) updateAllPoolCounts(ctx context.Context) error {
 		}
 	}
 
+	ipam.metrics.MatchingServices.Set(float64(len(ipam.serviceStore.satisfied) + len(ipam.serviceStore.unsatisfied)))
+	ipam.metrics.UnsatisfiedServices.Set(float64(len(ipam.serviceStore.unsatisfied)))
+
 	return nil
 }
 
@@ -1276,6 +1251,9 @@ func (ipam *LBIPAM) updatePoolCounts(pool *cilium_api_v2alpha1.CiliumLoadBalance
 		modifiedPoolStatus = true
 	}
 
+	ipam.metrics.AvailableIPs.WithLabelValues(pool.Name).Set(float64(totalCounts.Available))
+	ipam.metrics.UsedIPs.WithLabelValues(pool.Name).Set(float64(totalCounts.Used))
+
 	return modifiedPoolStatus
 }
 
@@ -1286,25 +1264,16 @@ func (ipam *LBIPAM) setPoolCondition(
 	reason, message string,
 ) (statusModified bool) {
 	// Don't trigger an update if the condition is already applied
-	for _, cond := range pool.Status.Conditions {
-		if cond.Type == condType &&
-			cond.Status == status &&
-			cond.ObservedGeneration == pool.Generation &&
-			cond.Reason == reason &&
-			cond.Message == message {
-			return false
-		}
+
+	if cond := meta.FindStatusCondition(pool.Status.Conditions, condType); cond != nil &&
+		cond.Status == status &&
+		cond.ObservedGeneration == pool.Generation &&
+		cond.Reason == reason &&
+		cond.Message == message {
+		return false
 	}
 
-	// Remove old conditions of the same type
-	for i := len(pool.Status.Conditions) - 1; i >= 0; i-- {
-		cond := pool.Status.Conditions[i]
-		if cond.Type == condType {
-			pool.Status.Conditions = slices.Delete(pool.Status.Conditions, i, i+1)
-		}
-	}
-
-	pool.Status.Conditions = append(pool.Status.Conditions, meta_v1.Condition{
+	meta.SetStatusCondition(&pool.Status.Conditions, meta_v1.Condition{
 		Type:               condType,
 		Status:             status,
 		ObservedGeneration: pool.Generation,
@@ -1380,6 +1349,9 @@ func (ipam *LBIPAM) deleteRangeAllocations(ctx context.Context, delRange *LBRang
 func (ipam *LBIPAM) handlePoolDeleted(ctx context.Context, pool *cilium_api_v2alpha1.CiliumLoadBalancerIPPool) error {
 	delete(ipam.pools, pool.GetName())
 
+	ipam.metrics.AvailableIPs.DeleteLabelValues(pool.Name)
+	ipam.metrics.UsedIPs.DeleteLabelValues(pool.Name)
+
 	poolRanges, _ := ipam.rangesStore.GetRangesForPool(pool.GetName())
 	for _, poolRange := range poolRanges {
 		// Remove allocations from services if the ranges no longer exist
@@ -1394,31 +1366,7 @@ func (ipam *LBIPAM) handlePoolDeleted(ctx context.Context, pool *cilium_api_v2al
 }
 
 func isPoolConflicting(pool *cilium_api_v2alpha1.CiliumLoadBalancerIPPool) bool {
-	var lastCondition *meta_v1.Condition
-
-	for i, cond := range pool.Status.Conditions {
-		if cond.Type != ciliumPoolConflict {
-			continue
-		}
-
-		if lastCondition == nil {
-			lastCondition = &pool.Status.Conditions[i]
-		}
-
-		if cond.ObservedGeneration > lastCondition.ObservedGeneration {
-			lastCondition = &pool.Status.Conditions[i]
-		}
-
-		if cond.LastTransitionTime.After(lastCondition.LastTransitionTime.Time) {
-			lastCondition = &pool.Status.Conditions[i]
-		}
-	}
-
-	if lastCondition == nil {
-		return false
-	}
-
-	return lastCondition.Status == meta_v1.ConditionTrue
+	return meta.IsStatusConditionTrue(pool.Status.Conditions, ciliumPoolConflict)
 }
 
 // settleConflicts check if there exist any un-resolved conflicts between the ranges of IP pools and resolve them.
@@ -1522,6 +1470,8 @@ func (ipam *LBIPAM) markPoolConflicting(
 		return nil
 	}
 
+	ipam.metrics.ConflictingPools.Inc()
+
 	ipam.logger.WithFields(logrus.Fields{
 		"pool1-name": targetPool.Name,
 		"pool1-cidr": ipNetStr(targetRange.allocRange.CIDR()),
@@ -1564,6 +1514,8 @@ func (ipam *LBIPAM) unmarkPool(ctx context.Context, targetPool *cilium_api_v2alp
 	for _, poolRange := range targetPoolRanges {
 		poolRange.internallyDisabled = false
 	}
+
+	ipam.metrics.ConflictingPools.Dec()
 
 	if ipam.setPoolCondition(targetPool, ciliumPoolConflict, meta_v1.ConditionFalse, "resolved", "") {
 		err := ipam.patchPoolStatus(ctx, targetPool)

@@ -8,7 +8,7 @@
   {{- $defaultKeepDeprecatedProbes = false -}}
 {{- end -}}
 
-{{- $kubeProxyReplacement := (coalesce .Values.kubeProxyReplacement "disabled") -}}
+{{- $kubeProxyReplacement := (coalesce .Values.kubeProxyReplacement "false") -}}
 
 ---
 apiVersion: apps/v1
@@ -16,6 +16,10 @@ kind: DaemonSet
 metadata:
   name: cilium
   namespace: {{ .Release.Namespace }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     k8s-app: cilium
     app.kubernetes.io/part-of: cilium
@@ -192,6 +196,10 @@ spec:
               fieldPath: metadata.namespace
         - name: CILIUM_CLUSTERMESH_CONFIG
           value: /var/lib/cilium/clustermesh/
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         {{- if .Values.k8sServiceHost }}
         - name: KUBERNETES_SERVICE_HOST
           value: {{ .Values.k8sServiceHost | quote }}
@@ -266,9 +274,9 @@ spec:
           {{- end }}
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
-        {{- if .Values.auth.mTLS.spire.enabled }}
+        {{- if .Values.authentication.mutual.spire.enabled }}
         - name: spire-agent-socket
-          mountPath: {{ dir .Values.auth.mTLS.spire.adminSocketPath }}
+          mountPath: {{ dir .Values.authentication.mutual.spire.adminSocketPath }}
           readOnly: false
         {{- end }}
         {{- if .Values.envoy.enabled }}
@@ -383,7 +391,7 @@ spec:
           for i in {1..5}; do \
             [ -S /var/run/cilium/monitor1_2.sock ] && break || sleep 10;\
             done; \
-          cilium monitor
+          cilium-dbg monitor
         {{- range $type := .Values.monitor.eventTypes -}}
           {{ " " }}--type={{ $type }}
         {{- end }}
@@ -433,6 +441,9 @@ spec:
         {{- if .Values.k8sServicePort }}
         - name: KUBERNETES_SERVICE_PORT
           value: {{ .Values.k8sServicePort | quote }}
+        {{- end }}
+        {{- with .Values.extraEnv }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
         volumeMounts:
         - name: tmp
@@ -587,6 +598,12 @@ spec:
               name: cilium-config
               key: clean-cilium-bpf-state
               optional: true
+        - name: WRITE_CNI_CONF_WHEN_READY
+          valueFrom:
+            configMapKeyRef:
+              name: cilium-config
+              key: write-cni-conf-when-ready
+              optional: true
         {{- if .Values.k8sServiceHost }}
         - name: KUBERNETES_SERVICE_HOST
           value: {{ .Values.k8sServiceHost | quote }}
@@ -631,7 +648,7 @@ spec:
         resources:
           {{- toYaml . | trim | nindent 10 }}
         {{- end }}
-      {{- if and .Values.waitForKubeProxy (ne $kubeProxyReplacement "strict") }}
+      {{- if and .Values.waitForKubeProxy (and (ne $kubeProxyReplacement "strict") (ne $kubeProxyReplacement "true"))  }}
       - name: wait-for-kube-proxy
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -664,6 +681,7 @@ spec:
             done
         terminationMessagePolicy: FallbackToLogsOnError
       {{- end }} # wait-for-kube-proxy
+      {{- if .Values.cni.install }}
       # Install the CNI binaries in an InitContainer so we don't have a writable host mount in the agent
       - name: install-cni-binaries
         image: {{ include "cilium.image" .Values.image | quote }}
@@ -690,6 +708,7 @@ spec:
         volumeMounts:
           - name: cni-path
             mountPath: /host/opt/cni/bin
+      {{- end }} # .Values.cni.install
       restartPolicy: Always
       priorityClassName: {{ include "cilium.priorityClass" (list $ .Values.priorityClassName "system-node-critical") }}
       serviceAccount: {{ .Values.serviceAccounts.cilium.name | quote }}
@@ -716,7 +735,7 @@ spec:
       tolerations:
         {{- toYaml . | trim | nindent 8 }}
       {{- end }}
-      {{- if and .Values.clustermesh.useAPIServer .Values.clustermesh.config.enabled }}
+      {{- if and .Values.clustermesh.useAPIServer .Values.clustermesh.config.enabled (not .Values.clustermesh.apiserver.kvstoremesh.enabled) }}
       hostAliases:
       {{- range $cluster := .Values.clustermesh.config.clusters }}
       {{- range $ip := $cluster.ips }}
@@ -773,10 +792,10 @@ spec:
         hostPath:
           path: /run/xtables.lock
           type: FileOrCreate
-      {{- if .Values.auth.mTLS.spire.enabled }}
+      {{- if .Values.authentication.mutual.spire.enabled }}
       - name: spire-agent-socket
         hostPath:
-          path: {{ dir .Values.auth.mTLS.spire.adminSocketPath }}
+          path: {{ dir .Values.authentication.mutual.spire.adminSocketPath }}
           type: DirectoryOrCreate
       {{- end }}
       {{- if .Values.envoy.enabled }}
@@ -843,7 +862,7 @@ spec:
               - key: ca.crt
                 path: common-etcd-client-ca.crt
           {{- else }}
-          - configMap:
+          - {{ .Values.tls.caBundle.useSecret | ternary "secret" "configMap" }}:
               name: {{ .Values.tls.caBundle.name }}
               optional: true
               items:
@@ -902,7 +921,7 @@ spec:
               - key: ca.crt
                 path: client-ca.crt
           {{- else }}
-          - configMap:
+          - {{ .Values.tls.caBundle.useSecret | ternary "secret" "configMap" }}:
               name: {{ .Values.tls.caBundle.name }}
               optional: true
               items:

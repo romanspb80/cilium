@@ -5,12 +5,15 @@ package manager
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"time"
 
 	"github.com/cilium/workerpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/exp/slices"
 
 	"github.com/cilium/cilium/pkg/backoff"
@@ -18,14 +21,17 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/iptables"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/hive/cell"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipcache"
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/labels"
+	cidrlabels "github.com/cilium/cilium/pkg/labels/cidr"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/metrics/metric"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/addressing"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
@@ -37,6 +43,8 @@ import (
 var (
 	randGen                    = rand.NewSafeRand(time.Now().UnixNano())
 	baseBackgroundSyncInterval = time.Minute
+
+	neighborTableRefreshControllerGroup = controller.NewGroup("neighbor-table-refresh")
 )
 
 const (
@@ -71,7 +79,6 @@ type Configuration interface {
 	TunnelingEnabled() bool
 	RemoteNodeIdentitiesEnabled() bool
 	NodeEncryptionEnabled() bool
-	EncryptionEnabled() bool
 }
 
 var _ Notifier = (*manager)(nil)
@@ -109,21 +116,8 @@ type manager struct {
 	// workerpool manages background workers
 	workerpool *workerpool.WorkerPool
 
-	// name is the name of the manager. It must be unique and feasibility
-	// to be used a prometheus metric name.
-	name string
-
-	// metricEventsReceived is the prometheus metric to track the number of
-	// node events received
-	metricEventsReceived *prometheus.CounterVec
-
-	// metricNumNodes is the prometheus metric to track the number of nodes
-	// being managed
-	metricNumNodes prometheus.Gauge
-
-	// metricDatapathValidations is the prometheus metric to track the
-	// number of datapath node validation calls
-	metricDatapathValidations prometheus.Counter
+	// metrics to track information about the node manager
+	metrics *nodeMetrics
 
 	// conf is the configuration of the caller passed in via NewManager.
 	// This field is immutable after NewManager()
@@ -135,6 +129,9 @@ type manager struct {
 	// controllerManager manages the controllers that are launched within the
 	// Manager.
 	controllerManager *controller.Manager
+
+	// healthReporter reports on the current health status of the node manager module.
+	healthReporter cell.HealthReporter
 }
 
 // Subscribe subscribes the given node handler to node events.
@@ -146,7 +143,12 @@ func (m *manager) Subscribe(nh datapath.NodeHandler) {
 	m.mutex.RLock()
 	for _, v := range m.nodes {
 		v.mutex.Lock()
-		nh.NodeAdd(v.node)
+		if err := nh.NodeAdd(v.node); err != nil {
+			log.WithFields(logrus.Fields{
+				"handler": nh.Name(),
+				"node":    v.node.Name,
+			}).WithError(err).Error("Failed applying node handler following initial subscribe. Cilium may have degraded functionality. See error message for more details.")
+		}
 		v.mutex.Unlock()
 	}
 	m.mutex.RUnlock()
@@ -169,41 +171,83 @@ func (m *manager) Iter(f func(nh datapath.NodeHandler)) {
 	}
 }
 
+type nodeMetrics struct {
+	// metricEventsReceived is the prometheus metric to track the number of
+	// node events received
+	EventsReceived metric.Vec[metric.Counter]
+
+	// metricNumNodes is the prometheus metric to track the number of nodes
+	// being managed
+	NumNodes metric.Gauge
+
+	// metricDatapathValidations is the prometheus metric to track the
+	// number of datapath node validation calls
+	DatapathValidations metric.Counter
+}
+
+// ProcessNodeDeletion upon node deletion ensures metrics associated
+// with the deleted node are no longer reported.
+// Notably for metrics node connectivity status and latency metrics
+func (*nodeMetrics) ProcessNodeDeletion(clusterName, nodeName string) {
+	// Removes all connectivity status associated with the deleted node.
+	_ = metrics.NodeConnectivityStatus.DeletePartialMatch(prometheus.Labels{
+		metrics.LabelSourceCluster:  clusterName,
+		metrics.LabelSourceNodeName: nodeName,
+	})
+	_ = metrics.NodeConnectivityStatus.DeletePartialMatch(prometheus.Labels{
+		metrics.LabelTargetCluster:  clusterName,
+		metrics.LabelTargetNodeName: nodeName,
+	})
+
+	// Removes all connectivity latency associated with the deleted node.
+	_ = metrics.NodeConnectivityLatency.DeletePartialMatch(prometheus.Labels{
+		metrics.LabelSourceCluster:  clusterName,
+		metrics.LabelSourceNodeName: nodeName,
+	})
+	_ = metrics.NodeConnectivityLatency.DeletePartialMatch(prometheus.Labels{
+		metrics.LabelTargetCluster:  clusterName,
+		metrics.LabelTargetNodeName: nodeName,
+	})
+}
+
+func NewNodeMetrics() *nodeMetrics {
+	return &nodeMetrics{
+		EventsReceived: metric.NewCounterVec(metric.CounterOpts{
+			ConfigName: metrics.Namespace + "_" + "nodes_all_events_received_total",
+			Namespace:  metrics.Namespace,
+			Subsystem:  "nodes",
+			Name:       "all_events_received_total",
+			Help:       "Number of node events received",
+		}, []string{"event_type", "source"}),
+
+		NumNodes: metric.NewGauge(metric.GaugeOpts{
+			ConfigName: metrics.Namespace + "_" + "nodes_all_num",
+			Namespace:  metrics.Namespace,
+			Subsystem:  "nodes",
+			Name:       "all_num",
+			Help:       "Number of nodes managed",
+		}),
+
+		DatapathValidations: metric.NewCounter(metric.CounterOpts{
+			ConfigName: metrics.Namespace + "_" + "nodes_all_datapath_validations_total",
+			Namespace:  metrics.Namespace,
+			Subsystem:  "nodes",
+			Name:       "all_datapath_validations_total",
+			Help:       "Number of validation calls to implement the datapath implementation of a node",
+		}),
+	}
+}
+
 // New returns a new node manager
-func New(name string, c Configuration, ipCache IPCache) (*manager, error) {
+func New(c Configuration, ipCache IPCache, nodeMetrics *nodeMetrics, healthReporter cell.HealthReporter) (*manager, error) {
 	m := &manager{
-		name:              name,
 		nodes:             map[nodeTypes.Identity]*nodeEntry{},
 		conf:              c,
 		controllerManager: controller.NewManager(),
 		nodeHandlers:      map[datapath.NodeHandler]struct{}{},
 		ipcache:           ipCache,
-	}
-
-	m.metricEventsReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metrics.Namespace,
-		Subsystem: "nodes",
-		Name:      name + "_events_received_total",
-		Help:      "Number of node events received",
-	}, []string{"event_type", "source"})
-
-	m.metricNumNodes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: metrics.Namespace,
-		Subsystem: "nodes",
-		Name:      name + "_num",
-		Help:      "Number of nodes managed",
-	})
-
-	m.metricDatapathValidations = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: metrics.Namespace,
-		Subsystem: "nodes",
-		Name:      name + "_datapath_validations_total",
-		Help:      "Number of validation calls to implement the datapath implementation of a node",
-	})
-
-	err := metrics.RegisterList([]prometheus.Collector{m.metricDatapathValidations, m.metricEventsReceived, m.metricNumNodes})
-	if err != nil {
-		return nil, err
+		metrics:           nodeMetrics,
+		healthReporter:    healthReporter,
 	}
 
 	return m, nil
@@ -224,10 +268,6 @@ func (m *manager) Stop(hive.HookContext) error {
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-
-	metrics.Unregister(m.metricNumNodes)
-	metrics.Unregister(m.metricEventsReceived)
-	metrics.Unregister(m.metricDatapathValidations)
 
 	return nil
 }
@@ -277,6 +317,7 @@ func (m *manager) backgroundSync(ctx context.Context) error {
 		syncInterval := m.backgroundSyncInterval()
 		log.WithField("syncInterval", syncInterval.String()).Debug("Performing regular background work")
 
+		var errs error
 		// get a copy of the node identities to avoid locking the entire manager
 		// throughout the process of running the datapath validation.
 		nodes := m.GetNodeIdentities()
@@ -293,11 +334,24 @@ func (m *manager) backgroundSync(ctx context.Context) error {
 			entry.mutex.Lock()
 			m.mutex.RUnlock()
 			m.Iter(func(nh datapath.NodeHandler) {
-				nh.NodeValidateImplementation(entry.node)
+				if err := nh.NodeValidateImplementation(entry.node); err != nil {
+					log.WithFields(logrus.Fields{
+						"handler": nh.Name(),
+						"node":    entry.node.Name,
+					}).WithError(err).
+						Error("Failed to apply node handler during background sync. Cilium may have degraded functionality. See error message for details.")
+					errs = errors.Join(errs, fmt.Errorf("failed while handling %s on node %s: %w", nh.Name(), entry.node.Name, err))
+				}
 			})
 			entry.mutex.Unlock()
 
-			m.metricDatapathValidations.Inc()
+			m.metrics.DatapathValidations.Inc()
+		}
+
+		if errs != nil {
+			m.healthReporter.Degraded("Failed to apply node validation", errs)
+		} else {
+			m.healthReporter.OK("Node validation successful")
 		}
 
 		select {
@@ -325,11 +379,6 @@ func (m *manager) legacyNodeIpBehavior() bool {
 	if m.conf.NodeEncryptionEnabled() {
 		return false
 	}
-	// Needed to store the tunnel endpoint for pod->remote node in the
-	// ipcache so that this traffic goes through the tunnel.
-	if m.conf.EncryptionEnabled() && m.conf.TunnelingEnabled() {
-		return false
-	}
 	return true
 }
 
@@ -338,7 +387,7 @@ func (m *manager) nodeAddressHasTunnelIP(address nodeTypes.Address) bool {
 	// through the tunnel to preserve the source identity as part of the
 	// encapsulation. In encryption case we also want to use vxlan device
 	// to create symmetric traffic when sending nodeIP->pod and pod->nodeIP.
-	return address.Type == addressing.NodeCiliumInternalIP || m.conf.EncryptionEnabled() ||
+	return address.Type == addressing.NodeCiliumInternalIP || m.conf.NodeEncryptionEnabled() ||
 		option.Config.EnableHostFirewall || option.Config.JoinCluster
 }
 
@@ -363,6 +412,18 @@ func (m *manager) nodeIdentityLabels(n nodeTypes.Node) (nodeLabels labels.Labels
 	if m.conf.RemoteNodeIdentitiesEnabled() {
 		if n.IsLocal() {
 			nodeLabels = labels.NewFrom(labels.LabelHost)
+			if option.Config.PolicyCIDRMatchesNodes() {
+				for _, address := range n.IPAddresses {
+					addr, ok := ip.AddrFromIP(address.IP)
+					if ok {
+						prefix, err := addr.Prefix(addr.BitLen())
+						if err == nil {
+							cidrLabels := cidrlabels.GetCIDRLabels(prefix)
+							nodeLabels.MergeLabels(cidrLabels)
+						}
+					}
+				}
+			}
 		} else if !identity.NumericIdentity(n.NodeIdentity).IsReservedIdentity() {
 			// This needs to match clustermesh-apiserver's VMManager.AllocateNodeIdentity
 			nodeLabels = labels.Map2Labels(n.Labels, labels.LabelSourceK8s)
@@ -433,10 +494,17 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 			dpUpdate = false
 		}
 
+		lbls := nodeLabels
+		// Add the CIDR labels for this node, if we allow selecting nodes by CIDR
+		if option.Config.PolicyCIDRMatchesNodes() {
+			lbls = labels.NewFrom(nodeLabels)
+			lbls.MergeLabels(cidrlabels.GetCIDRLabels(prefix))
+		}
+
 		// Always associate the prefix with metadata, even though this may not
 		// end up in an ipcache entry.
 		m.ipcache.UpsertMetadata(prefix, n.Source, resource,
-			nodeLabels,
+			lbls,
 			ipcacheTypes.TunnelPeer{Addr: tunnelIP},
 			ipcacheTypes.EncryptKey(key))
 		if nodeIdentityOverride {
@@ -480,7 +548,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 	m.mutex.Lock()
 	entry, oldNodeExists := m.nodes[nodeIdentifier]
 	if oldNodeExists {
-		m.metricEventsReceived.WithLabelValues("update", string(n.Source)).Inc()
+		m.metrics.EventsReceived.WithLabelValues("update", string(n.Source)).Inc()
 
 		if !source.AllowOverwrite(entry.node.Source, n.Source) {
 			// Done; skip node-handler updates and label injection
@@ -497,7 +565,13 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		entry.node = n
 		if dpUpdate {
 			m.Iter(func(nh datapath.NodeHandler) {
-				nh.NodeUpdate(oldNode, entry.node)
+				if err := nh.NodeUpdate(oldNode, entry.node); err != nil {
+					log.WithFields(logrus.Fields{
+						"handler": nh.Name(),
+						"node":    entry.node.Name,
+					}).WithError(err).
+						Error("Failed to handle node update event while applying handler. Cilium may be have degraded functionality. See error message for details.")
+				}
 			})
 		}
 
@@ -505,8 +579,8 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 
 		entry.mutex.Unlock()
 	} else {
-		m.metricEventsReceived.WithLabelValues("add", string(n.Source)).Inc()
-		m.metricNumNodes.Inc()
+		m.metrics.EventsReceived.WithLabelValues("add", string(n.Source)).Inc()
+		m.metrics.NumNodes.Inc()
 
 		entry = &nodeEntry{node: n}
 		entry.mutex.Lock()
@@ -514,7 +588,13 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		m.mutex.Unlock()
 		if dpUpdate {
 			m.Iter(func(nh datapath.NodeHandler) {
-				nh.NodeAdd(entry.node)
+				if err := nh.NodeAdd(entry.node); err != nil {
+					log.WithFields(logrus.Fields{
+						"node":    entry.node.Name,
+						"handler": nh.Name(),
+					}).WithError(err).
+						Error("Failed to handle node update event while applying handler. Cilium may be have degraded functionality. See error message for details.")
+				}
 			})
 		}
 		entry.mutex.Unlock()
@@ -601,7 +681,7 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 // origins from. If the node was removed, NodeDelete() is invoked of the
 // datapath interface.
 func (m *manager) NodeDeleted(n nodeTypes.Node) {
-	m.metricEventsReceived.WithLabelValues("delete", string(n.Source)).Inc()
+	m.metrics.EventsReceived.WithLabelValues("delete", string(n.Source)).Inc()
 
 	log.Debugf("Received node delete event from %s", n.Source)
 
@@ -633,13 +713,23 @@ func (m *manager) NodeDeleted(n nodeTypes.Node) {
 
 	m.removeNodeFromIPCache(entry.node, resource, nil, nil, nil)
 
-	m.metricNumNodes.Dec()
+	m.metrics.NumNodes.Dec()
+	m.metrics.ProcessNodeDeletion(n.Cluster, n.Name)
 
 	entry.mutex.Lock()
 	delete(m.nodes, nodeIdentifier)
 	m.mutex.Unlock()
 	m.Iter(func(nh datapath.NodeHandler) {
-		nh.NodeDelete(n)
+		if err := nh.NodeDelete(n); err != nil {
+			// For now we log the error and continue. Eventually we will want to encorporate
+			// this into the node managers health status.
+			// However this is a bit tricky - as leftover node deletes are not retries so this will
+			// need to be accompanied by some kind of retry mechanism.
+			log.WithFields(logrus.Fields{
+				"handler": nh.Name(),
+				"node":    n.Name,
+			}).WithError(err).Error("Failed to handle node delete event while applying handler. Cilium may be have degraded functionality.")
+		}
 	})
 	entry.mutex.Unlock()
 }
@@ -677,8 +767,10 @@ func (m *manager) GetNodes() map[nodeTypes.Identity]nodeTypes.Node {
 // by sending arping periodically.
 func (m *manager) StartNeighborRefresh(nh datapath.NodeNeighbors) {
 	ctx, cancel := context.WithCancel(context.Background())
-	controller.NewManager().UpdateController("neighbor-table-refresh",
+	controller.NewManager().UpdateController(
+		"neighbor-table-refresh",
 		controller.ControllerParams{
+			Group: neighborTableRefreshControllerGroup,
 			DoFunc: func(controllerCtx context.Context) error {
 				// Cancel previous goroutines from previous controller run
 				cancel()
@@ -706,5 +798,4 @@ func (m *manager) StartNeighborRefresh(nh datapath.NodeNeighbors) {
 			RunInterval: option.Config.ARPPingRefreshPeriod,
 		},
 	)
-	return
 }

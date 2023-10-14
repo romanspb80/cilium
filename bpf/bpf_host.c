@@ -47,6 +47,7 @@
 #include "lib/nodeport.h"
 #include "lib/eps.h"
 #include "lib/host_firewall.h"
+#include "lib/egress_gateway.h"
 #include "lib/egress_policies.h"
 #include "lib/overloadable.h"
 #include "lib/encrypt.h"
@@ -94,7 +95,7 @@ static __always_inline __u32
 resolve_srcid_ipv6(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
 		   __u32 srcid_from_proxy, const bool from_host)
 {
-	__u32 src_id = WORLD_ID, srcid_from_ipcache = srcid_from_proxy;
+	__u32 src_id = WORLD_IPV6_ID, srcid_from_ipcache = srcid_from_proxy;
 	struct remote_endpoint_info *info = NULL;
 	union v6addr *src;
 
@@ -139,15 +140,15 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 	    const bool from_host __maybe_unused,
 	    __s8 *ext_err __maybe_unused)
 {
-	struct ct_buffer6 __maybe_unused ct_buffer = {};
+#ifdef ENABLE_HOST_FIREWALL
+	struct ct_buffer6 ct_buffer = {};
+	bool need_hostfw = false;
+#endif /* ENABLE_HOST_FIREWALL */
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
 	int __maybe_unused ret;
 	int hdrlen;
 	__u8 nexthdr;
-#ifdef ENABLE_HOST_FIREWALL
-	bool need_hostfw = false;
-#endif /* ENABLE_HOST_FIREWALL */
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip6))
 		return DROP_INVALID;
@@ -159,7 +160,7 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 
 #ifdef ENABLE_HOST_FIREWALL
 	if (likely(nexthdr == IPPROTO_ICMPV6)) {
-		ret = icmp6_host_handle(ctx);
+		ret = icmp6_host_handle(ctx, ETH_HLEN + hdrlen);
 		if (ret == SKIP_HOST_FIREWALL)
 			goto skip_host_firewall;
 		if (IS_ERR(ret))
@@ -170,7 +171,7 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 #ifdef ENABLE_NODEPORT
 	if (!from_host) {
 		if (!ctx_skip_nodeport(ctx)) {
-			ret = nodeport_lb6(ctx, secctx, ext_err);
+			ret = nodeport_lb6(ctx, ip6, secctx, ext_err);
 			/* nodeport_lb6() returns with TC_ACT_REDIRECT for
 			 * traffic to L7 LB. Policy enforcement needs to take
 			 * place after L7 LB has processed the packet, so we
@@ -207,9 +208,7 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 		if (map_update_elem(&CT_TAIL_CALL_BUFFER6, &zero, &ct_buffer, 0) < 0)
 			return DROP_INVALID_TC_BUFFER;
 	}
-#endif /* ENABLE_HOST_FIREWALL */
 
-#ifdef ENABLE_HOST_FIREWALL
 skip_host_firewall:
 	ctx_store_meta(ctx, CB_FROM_HOST,
 		       (need_hostfw ? FROM_HOST_FLAG_NEED_HOSTFW : 0));
@@ -227,7 +226,6 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 		.monitor = TRACE_PAYLOAD_LEN,
 	};
 	__u32 __maybe_unused from_host_raw;
-	struct ct_buffer6 __maybe_unused *ct_buffer;
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
 	union v6addr *dst;
@@ -236,18 +234,17 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	struct endpoint_info *ep;
 	int ret;
 
-#ifdef ENABLE_HOST_FIREWALL
-	from_host_raw = ctx_load_meta(ctx, CB_FROM_HOST);
-	ctx_store_meta(ctx, CB_FROM_HOST, 0);
-#endif /* ENABLE_HOST_FIREWALL */
-
 	if (!revalidate_data(ctx, &data, &data_end, &ip6))
 		return DROP_INVALID;
 
 #ifdef ENABLE_HOST_FIREWALL
+	from_host_raw = ctx_load_meta(ctx, CB_FROM_HOST);
+	ctx_store_meta(ctx, CB_FROM_HOST, 0);
+
 	if (from_host_raw & FROM_HOST_FLAG_NEED_HOSTFW) {
+		struct ct_buffer6 *ct_buffer;
 		__u32 zero = 0;
-		__u32 remote_id = WORLD_ID;
+		__u32 remote_id = WORLD_IPV6_ID;
 
 		ct_buffer = map_lookup_elem(&CT_TAIL_CALL_BUFFER6, &zero);
 		if (!ct_buffer)
@@ -327,7 +324,7 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 		}
 #endif
 		return ipv6_local_delivery(ctx, l3_off, secctx, ep,
-					   METRIC_INGRESS, from_host, false);
+					   METRIC_INGRESS, from_host);
 	}
 
 	/* Below remainder is only relevant when traffic is pushed via cilium_host.
@@ -342,8 +339,7 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 #ifdef TUNNEL_MODE
 	if (info != NULL && info->tunnel_endpoint != 0) {
 		return encap_and_redirect_with_nodeid(ctx, info->tunnel_endpoint,
-						      info->node_id, secctx,
-						      info->sec_identity,
+						      secctx, info->sec_identity,
 						      &trace);
 	} else {
 		struct tunnel_key key = {};
@@ -361,7 +357,7 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	}
 #endif
 
-	if (!info || info->sec_identity == WORLD_ID) {
+	if (!info || identity_is_world_ipv6(info->sec_identity)) {
 		/* See IPv4 comment. */
 		return DROP_UNROUTABLE;
 	}
@@ -371,15 +367,15 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 static __always_inline int
 tail_handle_ipv6_cont(struct __ctx_buff *ctx, bool from_host)
 {
-	__u32 proxy_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
+	__u32 src_sec_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
 	int ret;
 	__s8 ext_err = 0;
 
 	ctx_store_meta(ctx, CB_SRC_LABEL, 0);
 
-	ret = handle_ipv6_cont(ctx, proxy_identity, from_host, &ext_err);
+	ret = handle_ipv6_cont(ctx, src_sec_identity, from_host, &ext_err);
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, proxy_identity, ret, ext_err,
+		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  CTX_ACT_DROP, METRIC_INGRESS);
 	return ret;
 }
@@ -399,30 +395,30 @@ int tail_handle_ipv6_cont_from_netdev(struct __ctx_buff *ctx)
 static __always_inline int
 tail_handle_ipv6(struct __ctx_buff *ctx, const bool from_host)
 {
-	__u32 proxy_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
+	__u32 src_sec_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
 	int ret;
 	__s8 ext_err = 0;
 
 	ctx_store_meta(ctx, CB_SRC_LABEL, 0);
 
-	ret = handle_ipv6(ctx, proxy_identity, from_host, &ext_err);
+	ret = handle_ipv6(ctx, src_sec_identity, from_host, &ext_err);
 
 	/* TC_ACT_REDIRECT is not an error, but it means we should stop here. */
 	if (ret == CTX_ACT_OK) {
-		ctx_store_meta(ctx, CB_SRC_LABEL, proxy_identity);
+		ctx_store_meta(ctx, CB_SRC_LABEL, src_sec_identity);
 		if (from_host)
-			invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
-					   CILIUM_CALL_IPV6_CONT_FROM_HOST,
-					   tail_handle_ipv6_cont_from_host);
+			ret = invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
+						 CILIUM_CALL_IPV6_CONT_FROM_HOST,
+						 tail_handle_ipv6_cont_from_host);
 		else
-			invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
-					   CILIUM_CALL_IPV6_CONT_FROM_NETDEV,
-					   tail_handle_ipv6_cont_from_netdev);
+			ret = invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
+						 CILIUM_CALL_IPV6_CONT_FROM_NETDEV,
+						 tail_handle_ipv6_cont_from_netdev);
 	}
 
 	/* Catch errors from both handle_ipv6 and invoke_tailcall_if here. */
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, proxy_identity, ret, ext_err,
+		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  CTX_ACT_DROP, METRIC_INGRESS);
 
 	return ret;
@@ -458,15 +454,13 @@ handle_to_netdev_ipv6(struct __ctx_buff *ctx, struct trace_ctx *trace, __s8 *ext
 	if (hdrlen < 0)
 		return hdrlen;
 
-#ifdef ENABLE_HOST_FIREWALL
 	if (likely(nexthdr == IPPROTO_ICMPV6)) {
-		ret = icmp6_host_handle(ctx);
+		ret = icmp6_host_handle(ctx, ETH_HLEN + hdrlen);
 		if (ret == SKIP_HOST_FIREWALL)
 			return CTX_ACT_OK;
 		if (IS_ERR(ret))
 			return ret;
 	}
-#endif /* ENABLE_HOST_FIREWALL */
 
 	if ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_HOST)
 		src_id = HOST_ID;
@@ -484,7 +478,7 @@ resolve_srcid_ipv4(struct __ctx_buff *ctx, struct iphdr *ip4,
 		   __u32 srcid_from_proxy, __u32 *sec_identity,
 		   const bool from_host)
 {
-	__u32 src_id = WORLD_ID, srcid_from_ipcache = srcid_from_proxy;
+	__u32 src_id = WORLD_IPV4_ID, srcid_from_ipcache = srcid_from_proxy;
 	struct remote_endpoint_info *info = NULL;
 
 	/* Packets from the proxy will already have a real identity. */
@@ -533,13 +527,13 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 	    const bool from_host __maybe_unused,
 	    __s8 *ext_err __maybe_unused)
 {
-	struct ct_buffer4 __maybe_unused ct_buffer = {};
-	void *data, *data_end;
-	struct iphdr *ip4;
 #ifdef ENABLE_HOST_FIREWALL
+	struct ct_buffer4 ct_buffer = {};
 	bool need_hostfw = false;
 	bool is_host_id = false;
 #endif /* ENABLE_HOST_FIREWALL */
+	void *data, *data_end;
+	struct iphdr *ip4;
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip4))
 		return DROP_INVALID;
@@ -556,7 +550,7 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 #ifdef ENABLE_NODEPORT
 	if (!from_host) {
 		if (!ctx_skip_nodeport(ctx)) {
-			int ret = nodeport_lb4(ctx, secctx, ext_err);
+			int ret = nodeport_lb4(ctx, ip4, ETH_HLEN, secctx, ext_err);
 
 			if (ret == NAT_46X64_RECIRC) {
 				ctx_store_meta(ctx, CB_SRC_LABEL, secctx);
@@ -621,23 +615,21 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 		.monitor = TRACE_PAYLOAD_LEN,
 	};
 	__u32 __maybe_unused from_host_raw;
-	struct ct_buffer4 __maybe_unused *ct_buffer = NULL;
 	void *data, *data_end;
 	struct iphdr *ip4;
 	struct remote_endpoint_info *info;
 	struct endpoint_info *ep;
 	int ret;
 
-#ifdef ENABLE_HOST_FIREWALL
-	from_host_raw = ctx_load_meta(ctx, CB_FROM_HOST);
-	ctx_store_meta(ctx, CB_FROM_HOST, 0);
-#endif /* ENABLE_HOST_FIREWALL */
-
 	if (!revalidate_data(ctx, &data, &data_end, &ip4))
 		return DROP_INVALID;
 
 #ifdef ENABLE_HOST_FIREWALL
+	from_host_raw = ctx_load_meta(ctx, CB_FROM_HOST);
+	ctx_store_meta(ctx, CB_FROM_HOST, 0);
+
 	if (from_host_raw & FROM_HOST_FLAG_NEED_HOSTFW) {
+		struct ct_buffer4 *ct_buffer;
 		__u32 zero = 0;
 		__u32 remote_id = 0;
 
@@ -744,7 +736,8 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 			if (eth_store_daddr(ctx, (__u8 *)&vtep->vtep_mac, 0) < 0)
 				return DROP_WRITE_ERROR;
 			return __encap_and_redirect_with_nodeid(ctx, 0, vtep->tunnel_endpoint,
-								secctx, WORLD_ID, WORLD_ID, &trace);
+								secctx, WORLD_IPV4_ID,
+								WORLD_IPV4_ID, &trace);
 		}
 	}
 skip_vtep:
@@ -755,8 +748,7 @@ skip_vtep:
 #ifdef TUNNEL_MODE
 	if (info != NULL && info->tunnel_endpoint != 0) {
 		return encap_and_redirect_with_nodeid(ctx, info->tunnel_endpoint,
-						      info->node_id, secctx,
-						      info->sec_identity,
+						      secctx, info->sec_identity,
 						      &trace);
 	} else {
 		/* IPv4 lookup key: daddr & IPV4_MASK */
@@ -772,7 +764,7 @@ skip_vtep:
 	}
 #endif
 
-	if (!info || info->sec_identity == WORLD_ID) {
+	if (!info || identity_is_world_ipv4(info->sec_identity)) {
 		/* We have received a packet for which no ipcache entry exists,
 		 * we do not know what to do with this packet, drop it.
 		 *
@@ -790,15 +782,15 @@ skip_vtep:
 static __always_inline int
 tail_handle_ipv4_cont(struct __ctx_buff *ctx, bool from_host)
 {
-	__u32 proxy_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
+	__u32 src_sec_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
 	int ret;
 	__s8 ext_err = 0;
 
 	ctx_store_meta(ctx, CB_SRC_LABEL, 0);
 
-	ret = handle_ipv4_cont(ctx, proxy_identity, from_host, &ext_err);
+	ret = handle_ipv4_cont(ctx, src_sec_identity, from_host, &ext_err);
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, proxy_identity, ret, ext_err,
+		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  CTX_ACT_DROP, METRIC_INGRESS);
 	return ret;
 }
@@ -818,30 +810,30 @@ int tail_handle_ipv4_cont_from_netdev(struct __ctx_buff *ctx)
 static __always_inline int
 tail_handle_ipv4(struct __ctx_buff *ctx, __u32 ipcache_srcid, const bool from_host)
 {
-	__u32 proxy_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
+	__u32 src_sec_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
 	int ret;
 	__s8 ext_err = 0;
 
 	ctx_store_meta(ctx, CB_SRC_LABEL, 0);
 
-	ret = handle_ipv4(ctx, proxy_identity, ipcache_srcid, from_host, &ext_err);
+	ret = handle_ipv4(ctx, src_sec_identity, ipcache_srcid, from_host, &ext_err);
 
 	/* TC_ACT_REDIRECT is not an error, but it means we should stop here. */
 	if (ret == CTX_ACT_OK) {
-		ctx_store_meta(ctx, CB_SRC_LABEL, proxy_identity);
+		ctx_store_meta(ctx, CB_SRC_LABEL, src_sec_identity);
 		if (from_host)
-			invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
-					   CILIUM_CALL_IPV4_CONT_FROM_HOST,
-					   tail_handle_ipv4_cont_from_host);
+			ret = invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
+						 CILIUM_CALL_IPV4_CONT_FROM_HOST,
+						 tail_handle_ipv4_cont_from_host);
 		else
-			invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
-					   CILIUM_CALL_IPV4_CONT_FROM_NETDEV,
-					   tail_handle_ipv4_cont_from_netdev);
+			ret = invoke_tailcall_if(is_defined(ENABLE_HOST_FIREWALL),
+						 CILIUM_CALL_IPV4_CONT_FROM_NETDEV,
+						 tail_handle_ipv4_cont_from_netdev);
 	}
 
 	/* Catch errors from both handle_ipv4 and invoke_tailcall_if here. */
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, proxy_identity, ret, ext_err,
+		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  CTX_ACT_DROP, METRIC_INGRESS);
 
 	return ret;
@@ -852,10 +844,10 @@ int tail_handle_ipv4_from_host(struct __ctx_buff *ctx)
 {
 	__u32 ipcache_srcid = 0;
 
-#if defined(ENABLE_HOST_FIREWALL) && !defined(ENABLE_MASQUERADE)
+#if defined(ENABLE_HOST_FIREWALL) && !defined(ENABLE_MASQUERADE_IPV4)
 	ipcache_srcid = ctx_load_meta(ctx, CB_IPCACHE_SRC_LABEL);
 	ctx_store_meta(ctx, CB_IPCACHE_SRC_LABEL, 0);
-#endif
+#endif /* defined(ENABLE_HOST_FIREWALL) && !defined(ENABLE_MASQUERADE_IPV4) */
 
 	return tail_handle_ipv4(ctx, ipcache_srcid, true);
 }
@@ -890,16 +882,7 @@ handle_to_netdev_ipv4(struct __ctx_buff *ctx, struct trace_ctx *trace, __s8 *ext
 #endif /* ENABLE_HOST_FIREWALL */
 #endif /* ENABLE_IPV4 */
 
-#ifdef ENABLE_IPSEC
-#ifndef TUNNEL_MODE
-static __always_inline int
-do_netdev_encrypt(struct __ctx_buff *ctx __maybe_unused,
-		  __u32 src_id __maybe_unused)
-{
-	return CTX_ACT_OK;
-}
-
-#else /* TUNNEL_MODE */
+#if defined(ENABLE_IPSEC) && defined(TUNNEL_MODE)
 static __always_inline int do_netdev_encrypt_encap(struct __ctx_buff *ctx, __u32 src_id)
 {
 	struct trace_ctx trace = {
@@ -936,18 +919,52 @@ static __always_inline int do_netdev_encrypt_encap(struct __ctx_buff *ctx, __u32
 
 	ctx->mark = 0;
 	bpf_clear_meta(ctx);
-	return __encap_and_redirect_with_nodeid(ctx, 0, ep->tunnel_endpoint,
-						src_id, 0, NOT_VTEP_DST,
-						&trace);
+	return encap_and_redirect_with_nodeid(ctx, ep->tunnel_endpoint,
+					      src_id, 0, &trace);
 }
+#endif /* ENABLE_IPSEC && TUNNEL_MODE */
 
-static __always_inline int do_netdev_encrypt(struct __ctx_buff *ctx,
-					     __u32 src_id)
+#ifdef ENABLE_L2_ANNOUNCEMENTS
+static __always_inline int handle_l2_announcement(struct __ctx_buff *ctx)
 {
-	return do_netdev_encrypt_encap(ctx, src_id);
-}
-#endif /* TUNNEL_MODE */
-#endif /* ENABLE_IPSEC */
+	union macaddr mac = NODE_MAC;
+	union macaddr smac;
+	__be32 sip;
+	__be32 tip;
+	struct l2_responder_v4_key key;
+	struct l2_responder_v4_stats *stats;
+	int ret;
+	__u32 index = RUNTIME_CONFIG_AGENT_LIVENESS;
+	__u64 *time;
+
+	time = map_lookup_elem(&CONFIG_MAP, &index);
+	if (!time)
+		return CTX_ACT_OK;
+
+	/* If the agent is not active for X seconds, we can't trust the contents
+	 * of the responder map anymore. So stop responding, assuming other nodes
+	 * will take over for a node without an active agent.
+	 */
+	if (ktime_get_ns() - (*time) > L2_ANNOUNCEMENTS_MAX_LIVENESS)
+		return CTX_ACT_OK;
+
+	if (!arp_validate(ctx, &mac, &smac, &sip, &tip))
+		return CTX_ACT_OK;
+
+	key.ip4 = tip;
+	key.ifindex = ctx->ingress_ifindex;
+	stats = map_lookup_elem(&L2_RESPONDER_MAP4, &key);
+	if (!stats)
+		return CTX_ACT_OK;
+
+	ret = arp_respond(ctx, &mac, tip, &smac, sip, 0);
+
+	if (ret == CTX_ACT_REDIRECT)
+		__sync_fetch_and_add(&stats->responses_sent, 1);
+
+	return ret;
+};
+#endif
 
 static __always_inline int
 do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
@@ -992,13 +1009,16 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
 			send_trace_notify(ctx, TRACE_FROM_STACK, identity, 0, 0,
 					  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED,
 					  TRACE_PAYLOAD_LEN);
-			ret = do_netdev_encrypt(ctx, identity);
+			ret = CTX_ACT_OK;
+# ifdef TUNNEL_MODE
+			ret = do_netdev_encrypt_encap(ctx, identity);
 			if (IS_ERR(ret))
 				return send_drop_notify_error(ctx, identity, ret,
 							      CTX_ACT_DROP, METRIC_EGRESS);
+# endif /* TUNNEL_MODE */
 			return ret;
 		}
-#endif
+#endif /* ENABLE_IPSEC */
 
 		send_trace_notify(ctx, trace, identity, 0, 0,
 				  ctx->ingress_ifindex,
@@ -1012,9 +1032,14 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
 	bpf_clear_meta(ctx);
 
 	switch (proto) {
-# if defined ENABLE_ARP_PASSTHROUGH || defined ENABLE_ARP_RESPONDER
+# if defined ENABLE_ARP_PASSTHROUGH || defined ENABLE_ARP_RESPONDER || \
+     defined ENABLE_L2_ANNOUNCEMENTS
 	case bpf_htons(ETH_P_ARP):
-		ret = CTX_ACT_OK;
+		#ifdef ENABLE_L2_ANNOUNCEMENTS
+			ret = handle_l2_announcement(ctx);
+		#else
+			ret = CTX_ACT_OK;
+		#endif
 		break;
 # endif
 #ifdef ENABLE_IPV6
@@ -1047,13 +1072,13 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
 					      from_host);
 		ctx_store_meta(ctx, CB_SRC_LABEL, identity);
 		if (from_host) {
-# if defined(ENABLE_HOST_FIREWALL) && !defined(ENABLE_MASQUERADE)
+# if defined(ENABLE_HOST_FIREWALL) && !defined(ENABLE_MASQUERADE_IPV4)
 			/* If we don't rely on BPF-based masquerading, we need
 			 * to pass the srcid from ipcache to host firewall. See
 			 * comment in ipv4_host_policy_egress() for details.
 			 */
 			ctx_store_meta(ctx, CB_IPCACHE_SRC_LABEL, ipcache_srcid);
-# endif
+# endif /* defined(ENABLE_HOST_FIREWALL) && !defined(ENABLE_MASQUERADE_IPV4) */
 			ep_tail_call(ctx, CILIUM_CALL_IPV4_FROM_HOST);
 		} else {
 			ep_tail_call(ctx, CILIUM_CALL_IPV4_FROM_NETDEV);
@@ -1066,7 +1091,7 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
 		 */
 		return send_drop_notify_error(ctx, identity, DROP_MISSED_TAIL_CALL,
 					      CTX_ACT_OK, METRIC_INGRESS);
-#endif
+#endif /* ENABLE_IPV4 */
 	default:
 #ifdef ENABLE_HOST_FIREWALL
 		ret = send_drop_notify_error(ctx, identity, DROP_UNKNOWN_L3,
@@ -1091,12 +1116,24 @@ static __always_inline int
 handle_netdev(struct __ctx_buff *ctx, const bool from_host)
 {
 	__u16 proto;
-
 	if (!validate_ethertype(ctx, &proto)) {
 #ifdef ENABLE_HOST_FIREWALL
 		int ret = DROP_UNSUPPORTED_L2;
-
-		return send_drop_notify(ctx, SECLABEL, WORLD_ID, 0, ret,
+		__u32 id = WORLD_ID;
+		__u32 sec_label = SECLABEL;
+#if defined ENABLE_IPV4 && defined ENABLE_IPV6
+		switch (proto) {
+		case bpf_htons(ETH_P_IP):
+			id = WORLD_IPV4_ID;
+			sec_label = SECLABEL_IPV4;
+			break;
+		case bpf_htons(ETH_P_IPV6):
+			id = WORLD_IPV6_ID;
+			sec_label = SECLABEL_IPV6;
+			break;
+		}
+#endif
+		return send_drop_notify(ctx, sec_label, id, 0, ret,
 					CTX_ACT_DROP, METRIC_EGRESS);
 #else
 		send_trace_notify(ctx, TRACE_TO_STACK, HOST_ID, 0, 0, 0,
@@ -1140,7 +1177,7 @@ handle_srv6(struct __ctx_buff *ctx)
 		if (ep) {
 			dst_sec_identity = ep->sec_identity;
 		} else {
-			dst_sec_identity = WORLD_ID;
+			dst_sec_identity = WORLD_IPV6_ID;
 		}
 
 		if (identity_is_cluster(dst_sec_identity))
@@ -1173,7 +1210,7 @@ handle_srv6(struct __ctx_buff *ctx)
 		if (ep) {
 			dst_sec_identity = ep->sec_identity;
 		} else {
-			dst_sec_identity = WORLD_ID;
+			dst_sec_identity = WORLD_IPV6_ID;
 		}
 
 		if (identity_is_cluster(dst_sec_identity))
@@ -1204,9 +1241,10 @@ handle_srv6(struct __ctx_buff *ctx)
  * managed by Cilium (e.g., eth0). This program is only attached when:
  * - the host firewall is enabled, or
  * - BPF NodePort is enabled, or
+ * - L2 announcements are enabled, or
  * - WireGuard's host-to-host encryption and BPF NodePort are enabled
  */
-__section("from-netdev")
+__section_entry
 int cil_from_netdev(struct __ctx_buff *ctx)
 {
 	__u32 __maybe_unused src_id = 0;
@@ -1262,7 +1300,7 @@ drop_err:
  * from-host is attached as a tc egress filter to the node's 'cilium_host'
  * interface if present.
  */
-__section("from-host")
+__section_entry
 int cil_from_host(struct __ctx_buff *ctx)
 {
 	/* Traffic from the host ns going through cilium_host device must
@@ -1276,20 +1314,21 @@ int cil_from_host(struct __ctx_buff *ctx)
  * to-netdev is attached as a tc egress filter to one or more physical devices
  * managed by Cilium (e.g., eth0). This program is only attached when:
  * - the host firewall is enabled, or
- * - BPF NodePort is enabled
+ * - BPF NodePort is enabled, or
+ * - WireGuard encryption is enabled
  */
-__section("to-netdev")
+__section_entry
 int cil_to_netdev(struct __ctx_buff *ctx __maybe_unused)
 {
 	struct trace_ctx trace = {
 		.reason = TRACE_REASON_UNKNOWN,
 		.monitor = 0,
 	};
-	__u16 __maybe_unused proto = 0;
 	__u32 __maybe_unused vlan_id;
 	int ret = CTX_ACT_OK;
-#ifdef ENABLE_HOST_FIREWALL
 	__s8 ext_err = 0;
+#ifdef ENABLE_HOST_FIREWALL
+	__u16 proto = 0;
 #endif
 
 	/* Filter allowed vlan id's and pass them back to kernel.
@@ -1321,7 +1360,10 @@ int cil_to_netdev(struct __ctx_buff *ctx __maybe_unused)
 #endif
 
 #ifdef ENABLE_HOST_FIREWALL
-	if (!proto && !validate_ethertype(ctx, &proto)) {
+	if (ctx_snat_done(ctx))
+		goto skip_host_firewall;
+
+	if (!validate_ethertype(ctx, &proto)) {
 		ret = DROP_UNSUPPORTED_L2;
 		goto out;
 	}
@@ -1353,6 +1395,8 @@ out:
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, 0, ret, ext_err,
 						  CTX_ACT_DROP, METRIC_EGRESS);
+
+skip_host_firewall:
 #endif /* ENABLE_HOST_FIREWALL */
 
 #if defined(ENABLE_BANDWIDTH_MANAGER)
@@ -1382,6 +1426,18 @@ out:
 	else if (IS_ERR(ret))
 		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
 					      METRIC_EGRESS);
+
+	/* We disable the WireGuard strict mode if the tunnel mode is enabled,
+	 * since we have a check earlier in the datapath before encapsulation.
+	 * We chose this approach so that we don't have to decapsulate the
+	 * packet to check if the packet's original destination is allowed to
+	 * be sent unencrypted.
+	 */
+#if !defined(TUNNEL_MODE) && defined(ENCRYPTION_STRICT_MODE)
+	if (!strict_allow(ctx))
+		return send_drop_notify_error(ctx, 0, DROP_UNENCRYPTED_TRAFFIC,
+					      CTX_ACT_DROP, METRIC_EGRESS);
+#endif /* !TUNNEL_MODE && ENCRYPTION_STRICT_MODE */
 #endif /* ENABLE_WIREGUARD */
 
 #ifdef ENABLE_SRV6
@@ -1391,25 +1447,30 @@ out:
 					      METRIC_EGRESS);
 #endif /* ENABLE_SRV6 */
 
+#ifdef ENABLE_HEALTH_CHECK
+	ret = lb_handle_health(ctx);
+	if (ret != CTX_ACT_OK)
+		goto exit;
+#endif
+
 #ifdef ENABLE_NODEPORT
 	if (!ctx_snat_done(ctx)) {
 		/*
 		 * handle_nat_fwd tail calls in the majority of cases,
 		 * so control might never return to this program.
 		 */
-		ret = handle_nat_fwd(ctx, 0);
-		if (IS_ERR(ret))
-			return send_drop_notify_error(ctx, 0, ret,
-						      CTX_ACT_DROP,
-						      METRIC_EGRESS);
+		ret = handle_nat_fwd(ctx, 0, &trace, &ext_err);
+		if (ret == CTX_ACT_REDIRECT)
+			return ret;
 	}
 #endif
+
 #ifdef ENABLE_HEALTH_CHECK
-	ret = lb_handle_health(ctx);
-	if (IS_ERR(ret))
-		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
-					      METRIC_EGRESS);
+exit:
 #endif
+	if (IS_ERR(ret))
+		return send_drop_notify_error_ext(ctx, 0, ret, ext_err,
+						  CTX_ACT_DROP, METRIC_EGRESS);
 	send_trace_notify(ctx, TRACE_TO_NETWORK, 0, 0, 0,
 			  0, trace.reason, trace.monitor);
 
@@ -1420,7 +1481,7 @@ out:
  * to-host is attached as a tc ingress filter to both the 'cilium_host' and
  * 'cilium_net' devices if present.
  */
-__section("to-host")
+__section_entry
 int cil_to_host(struct __ctx_buff *ctx)
 {
 	__u32 magic = ctx_load_meta(ctx, CB_PROXY_MAGIC);
@@ -1565,20 +1626,20 @@ to_host_from_lxc(struct __ctx_buff *ctx __maybe_unused)
 # endif
 # ifdef ENABLE_IPV6
 	case bpf_htons(ETH_P_IPV6):
-		invoke_tailcall_if(__or(__and(is_defined(ENABLE_IPV4),
-					      is_defined(ENABLE_IPV6)),
-					is_defined(DEBUG)),
-				   CILIUM_CALL_IPV6_TO_HOST_POLICY_ONLY,
-				   tail_ipv6_host_policy_ingress);
+		ret = invoke_tailcall_if(__or(__and(is_defined(ENABLE_IPV4),
+						    is_defined(ENABLE_IPV6)),
+					      is_defined(DEBUG)),
+					 CILIUM_CALL_IPV6_TO_HOST_POLICY_ONLY,
+					 tail_ipv6_host_policy_ingress);
 		break;
 # endif
 # ifdef ENABLE_IPV4
 	case bpf_htons(ETH_P_IP):
-		invoke_tailcall_if(__or(__and(is_defined(ENABLE_IPV4),
-					      is_defined(ENABLE_IPV6)),
-					is_defined(DEBUG)),
-				   CILIUM_CALL_IPV4_TO_HOST_POLICY_ONLY,
-				   tail_ipv4_host_policy_ingress);
+		ret = invoke_tailcall_if(__or(__and(is_defined(ENABLE_IPV4),
+						    is_defined(ENABLE_IPV6)),
+					      is_defined(DEBUG)),
+					 CILIUM_CALL_IPV4_TO_HOST_POLICY_ONLY,
+					 tail_ipv4_host_policy_ingress);
 		break;
 # endif
 	default:
@@ -1672,7 +1733,8 @@ int handle_lxc_traffic(struct __ctx_buff *ctx)
 		lxc_id = ctx_load_meta(ctx, CB_DST_ENDPOINT_ID);
 		ctx_store_meta(ctx, CB_SRC_LABEL, HOST_ID);
 		tail_call_dynamic(ctx, &POLICY_CALL_MAP, lxc_id);
-		return DROP_MISSED_TAIL_CALL;
+		return send_drop_notify_error(ctx, HOST_ID, DROP_MISSED_TAIL_CALL,
+					      CTX_ACT_DROP, METRIC_EGRESS);
 	}
 
 	return to_host_from_lxc(ctx);

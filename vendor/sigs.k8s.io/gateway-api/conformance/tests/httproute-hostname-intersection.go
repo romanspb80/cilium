@@ -35,14 +35,18 @@ func init() {
 var HTTPRouteHostnameIntersection = suite.ConformanceTest{
 	ShortName:   "HTTPRouteHostnameIntersection",
 	Description: "HTTPRoutes should attach to listeners only if they have intersecting hostnames, and should accept requests only for the intersecting hostnames",
-	Manifests:   []string{"tests/httproute-hostname-intersection.yaml"},
+	Features: []suite.SupportedFeature{
+		suite.SupportGateway,
+		suite.SupportHTTPRoute,
+	},
+	Manifests: []string{"tests/httproute-hostname-intersection.yaml"},
 	Test: func(t *testing.T, suite *suite.ConformanceTestSuite) {
 		ns := "gateway-conformance-infra"
 		gwNN := types.NamespacedName{Name: "httproute-hostname-intersection", Namespace: ns}
 
 		// This test creates an additional Gateway in the gateway-conformance-infra
 		// namespace so we have to wait for it to be ready.
-		kubernetes.NamespacesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, []string{ns})
+		kubernetes.NamespacesMustBeReady(t, suite.Client, suite.TimeoutConfig, []string{ns})
 
 		t.Run("HTTPRoutes that do intersect with listener hostnames", func(t *testing.T) {
 			routes := []types.NamespacedName{
@@ -52,6 +56,9 @@ var HTTPRouteHostnameIntersection = suite.ConformanceTest{
 				{Namespace: ns, Name: "wildcard-host-matches-listener-wildcard-host"},
 			}
 			gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routes...)
+			for _, routeNN := range routes {
+				kubernetes.HTTPRouteMustHaveResolvedRefsConditionsTrue(t, suite.Client, suite.TimeoutConfig, routeNN, gwNN)
+			}
 
 			var testCases []http.ExpectedResponse
 
@@ -59,6 +66,13 @@ var HTTPRouteHostnameIntersection = suite.ConformanceTest{
 			testCases = append(testCases,
 				http.ExpectedResponse{
 					Request:   http.Request{Host: "very.specific.com", Path: "/s1"},
+					Backend:   "infra-backend-v1",
+					Namespace: ns,
+				},
+				// Port value within the Host header MUST not be considered while
+				// performing match against hostname.
+				http.ExpectedResponse{
+					Request:   http.Request{Host: "very.specific.com:1234", Path: "/s1"},
 					Backend:   "infra-backend-v1",
 					Namespace: ns,
 				},

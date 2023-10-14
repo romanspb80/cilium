@@ -10,6 +10,10 @@
 Layer 7 Protocol Visibility
 ***************************
 
+.. note::
+
+    This feature requires enabling L7 Proxy support. Without it, the visibility annotation is ignored.
+
 While :ref:`monitor` provides introspection into datapath state, by default it
 will only provide visibility into L3/L4 packet events. If :ref:`l7_policy` are
 configured, one can get visibility into L7 protocols, but this requires the full
@@ -39,7 +43,7 @@ command line, e.g.:
 
 Cilium will pick up that pods have received these annotations, and will
 transparently redirect traffic to the proxy such that the output of
-``cilium monitor`` shows traffic being redirected to the proxy, e.g.:
+``cilium-dbg monitor`` shows traffic being redirected to the proxy, e.g.:
 
 ::
 
@@ -66,10 +70,31 @@ In order for Cilium to populate the ``INGRESS ENFORCEMENT``, ``EGRESS ENFORCEMEN
 and ``VISIBILITY POLICY`` fields, it must run with ``--endpoint-status=policy``
 to make field values visible.
 
+Security Implications
+---------------------
+
+Monitoring Layer 7 traffic involves security considerations for handling
+potentially sensitive information, such as usernames, passwords, query
+parameters, API keys, and others.
+
+.. warning::
+
+   By default, Hubble does not redact potentially sensitive information
+   present in `Layer 7 Hubble Flows <https://github.com/cilium/cilium/tree/master/api/v1/flow#flow-Layer7>`_.
+
+To harden security, Cilium provides the ``--hubble-redact-enabled`` option which
+enables Hubble to handle sensitive information present in Layer 7 flows.
+More specifically, it offers the following features for supported Layer 7 protocols:
+
+* For HTTP: redacting URL query (GET) parameters (``--hubble-redact-http-urlquery``)
+* For Kafka: redacting API key (``--hubble-redact-kafka-apikey``)
+
+For more information on configuring Cilium, see :ref:`Cilium Configuration <configuration>`.
+
 Troubleshooting
 ---------------
 
-If L7 visibility is not appearing in ``cilium monitor`` or Hubble components,
+If L7 visibility is not appearing in ``cilium-dbg monitor`` or Hubble components,
 it is worth double-checking that:
 
  * No enforcement policy is applied in the direction specified in the
@@ -97,8 +122,3 @@ Limitations
 * Visibility annotations do not apply if rules are imported which select the pod
   which is annotated.
 * DNS visibility is available on egress only.
-* Proxylib parsers are not supported, including Kafka. To gain visibility on
-  these protocols, you must create a network policy that allows all of the
-  traffic at L7, either by following :ref:`l7_policy`
-  (:ref:`Kafka <kafka_policy>`) or the :ref:`envoy` proxylib extensions guide.
-  This limitation is tracked by :gh-issue:`14072`.

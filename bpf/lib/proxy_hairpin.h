@@ -26,17 +26,11 @@ ctx_redirect_to_proxy_hairpin(struct __ctx_buff *ctx, __be16 proxy_port, const b
 	union macaddr host_mac = HOST_IFINDEX_MAC;
 	union macaddr router_mac = NODE_MAC;
 #endif
-	void *data_end = (void *)(long)ctx->data_end;
-	void *data = (void *)(long)ctx->data;
-	struct iphdr *ip4;
 	int ret = 0;
 
 	ctx_store_meta(ctx, CB_PROXY_MAGIC,
 		       MARK_MAGIC_TO_PROXY | (proxy_port << 16));
 	bpf_barrier(); /* verifier workaround */
-
-	if (!revalidate_data(ctx, &data, &data_end, &ip4))
-		return DROP_INVALID;
 
 	if (is_ipv6) {
 #ifdef ENABLE_IPV6
@@ -45,6 +39,12 @@ ctx_redirect_to_proxy_hairpin(struct __ctx_buff *ctx, __be16 proxy_port, const b
 #endif
 	} else {
 #ifdef ENABLE_IPV4
+		void *data, *data_end;
+		struct iphdr *ip4;
+
+		if (!revalidate_data(ctx, &data, &data_end, &ip4))
+			return DROP_INVALID;
+
 		ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac, (__u8 *)&host_mac,
 			      ip4);
 #endif
@@ -52,7 +52,7 @@ ctx_redirect_to_proxy_hairpin(struct __ctx_buff *ctx, __be16 proxy_port, const b
 	if (IS_ERR(ret))
 		return ret;
 
-	cilium_dbg(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port, 0);
+	cilium_dbg_capture(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port);
 
 	/* Note that the actual __ctx_buff preparation for submitting the
 	 * packet to the proxy will occur in a subsequent program via

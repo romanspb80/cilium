@@ -36,6 +36,11 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 )
 
+var (
+	restoreEndpointIdentityControllerGroup = controller.NewGroup("restore-endpoint-identity")
+	initialGlobalIdentitiesControllerGroup = controller.NewGroup("initial-global-identities")
+)
+
 // getCiliumVersionString returns the first line containing ciliumCHeaderPrefix.
 func getCiliumVersionString(epCHeaderFilePath string) ([]byte, error) {
 	f, err := os.Open(epCHeaderFilePath)
@@ -188,8 +193,8 @@ func partitionEPDirNamesByRestoreStatus(eptsDirNames []string) (complete []strin
 // * regenerates the endpoint
 // Returns an error if any operation fails while trying to perform the above
 // operations.
-func (e *Endpoint) RegenerateAfterRestore() error {
-	if err := e.restoreIdentity(); err != nil {
+func (e *Endpoint) RegenerateAfterRestore(regenerator *Regenerator) error {
+	if err := e.restoreIdentity(regenerator); err != nil {
 		return err
 	}
 
@@ -203,14 +208,11 @@ func (e *Endpoint) RegenerateAfterRestore() error {
 		return fmt.Errorf("failed while regenerating endpoint")
 	}
 
-	// NOTE: unconditionalRLock is used here because it's used only for logging an already restored endpoint
-	e.unconditionalRLock()
 	scopedLog.WithField(logfields.IPAddr, []string{e.GetIPv4Address(), e.GetIPv6Address()}).Info("Restored endpoint")
-	e.runlock()
 	return nil
 }
 
-func (e *Endpoint) restoreIdentity() error {
+func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 	if err := e.rlockAlive(); err != nil {
 		e.logDisconnectedMutexAction(err, "before filtering labels during regenerating restored endpoint")
 		return err
@@ -231,6 +233,7 @@ func (e *Endpoint) restoreIdentity() error {
 	)
 	e.UpdateController(controllerName,
 		controller.ControllerParams{
+			Group: restoreEndpointIdentityControllerGroup,
 			DoFunc: func(ctx context.Context) (err error) {
 				allocateCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
 				defer cancel()
@@ -264,6 +267,7 @@ func (e *Endpoint) restoreIdentity() error {
 		var gotInitialGlobalIdentities = make(chan struct{})
 		e.UpdateController(controllerName,
 			controller.ControllerParams{
+				Group: initialGlobalIdentitiesControllerGroup,
 				DoFunc: func(ctx context.Context) (err error) {
 					identityCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
 					defer cancel()
@@ -292,6 +296,12 @@ func (e *Endpoint) restoreIdentity() error {
 	// the regenerated datapath always lookups from a ready ipcache map.
 	if option.Config.KVStore != "" {
 		ipcache.WaitForKVStoreSync()
+	}
+
+	// Wait for ipcache and identities synchronization from all remote clusters,
+	// to prevent disrupting cross-cluster connections on endpoint regeneration.
+	if err := regenerator.WaitForClusterMeshIPIdentitiesSync(e.aliveCtx); err != nil {
+		return err
 	}
 
 	if err := e.lockAlive(); err != nil {
@@ -363,29 +373,31 @@ func (e *Endpoint) restoreIdentity() error {
 func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 
 	return &serializableEndpoint{
-		ID:                    e.ID,
-		ContainerName:         e.containerName,
-		ContainerID:           e.containerID,
-		DockerNetworkID:       e.dockerNetworkID,
-		DockerEndpointID:      e.dockerEndpointID,
-		IfName:                e.ifName,
-		IfIndex:               e.ifIndex,
-		OpLabels:              e.OpLabels,
-		LXCMAC:                e.mac,
-		IPv6:                  e.IPv6,
-		IPv6IPAMPool:          e.IPv6IPAMPool,
-		IPv4:                  e.IPv4,
-		IPv4IPAMPool:          e.IPv4IPAMPool,
-		NodeMAC:               e.nodeMAC,
-		SecurityIdentity:      e.SecurityIdentity,
-		Options:               e.Options,
-		DNSRules:              e.DNSRules,
-		DNSHistory:            e.DNSHistory,
-		DNSZombies:            e.DNSZombies,
-		K8sPodName:            e.K8sPodName,
-		K8sNamespace:          e.K8sNamespace,
-		DatapathConfiguration: e.DatapathConfiguration,
-		CiliumEndpointUID:     e.ciliumEndpointUID,
+		ID:                       e.ID,
+		ContainerName:            e.GetContainerName(),
+		ContainerID:              e.GetContainerID(),
+		DockerNetworkID:          e.dockerNetworkID,
+		DockerEndpointID:         e.dockerEndpointID,
+		IfName:                   e.ifName,
+		IfIndex:                  e.ifIndex,
+		ContainerIfName:          e.containerIfName,
+		DisableLegacyIdentifiers: e.disableLegacyIdentifiers,
+		OpLabels:                 e.OpLabels,
+		LXCMAC:                   e.mac,
+		IPv6:                     e.IPv6,
+		IPv6IPAMPool:             e.IPv6IPAMPool,
+		IPv4:                     e.IPv4,
+		IPv4IPAMPool:             e.IPv4IPAMPool,
+		NodeMAC:                  e.nodeMAC,
+		SecurityIdentity:         e.SecurityIdentity,
+		Options:                  e.Options,
+		DNSRules:                 e.DNSRules,
+		DNSHistory:               e.DNSHistory,
+		DNSZombies:               e.DNSZombies,
+		K8sPodName:               e.K8sPodName,
+		K8sNamespace:             e.K8sNamespace,
+		DatapathConfiguration:    e.DatapathConfiguration,
+		CiliumEndpointUID:        e.ciliumEndpointUID,
 	}
 }
 
@@ -423,6 +435,13 @@ type serializableEndpoint struct {
 
 	// ifIndex is the interface index of the host face interface (veth pair)
 	IfIndex int
+
+	// ContainerIfName is the name of the container facing interface (veth pair).
+	ContainerIfName string
+
+	// DisableLegacyIdentifiers disables lookup using legacy endpoint identifiers
+	// (container name, container id, pod name) for this endpoint.
+	DisableLegacyIdentifiers bool
 
 	// OpLabels is the endpoint's label configuration
 	//
@@ -512,12 +531,14 @@ func (ep *Endpoint) MarshalJSON() ([]byte, error) {
 func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.ID = r.ID
 	ep.createdAt = time.Now()
-	ep.containerName = r.ContainerName
-	ep.containerID = r.ContainerID
+	ep.containerName.Store(&r.ContainerName)
+	ep.containerID.Store(&r.ContainerID)
 	ep.dockerNetworkID = r.DockerNetworkID
 	ep.dockerEndpointID = r.DockerEndpointID
 	ep.ifName = r.IfName
 	ep.ifIndex = r.IfIndex
+	ep.containerIfName = r.ContainerIfName
+	ep.disableLegacyIdentifiers = r.DisableLegacyIdentifiers
 	ep.OpLabels = r.OpLabels
 	ep.mac = r.LXCMAC
 	ep.IPv6 = r.IPv6

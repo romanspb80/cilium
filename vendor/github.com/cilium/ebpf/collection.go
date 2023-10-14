@@ -9,6 +9,9 @@ import (
 
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
+	"github.com/cilium/ebpf/internal"
+	"github.com/cilium/ebpf/internal/kconfig"
+	"github.com/cilium/ebpf/internal/sysenc"
 )
 
 // CollectionOptions control loading a collection into the kernel.
@@ -107,6 +110,16 @@ func (cs *CollectionSpec) RewriteMaps(maps map[string]*Map) error {
 	return nil
 }
 
+// MissingConstantsError is returned by [CollectionSpec.RewriteConstants].
+type MissingConstantsError struct {
+	// The constants missing from .rodata.
+	Constants []string
+}
+
+func (m *MissingConstantsError) Error() string {
+	return fmt.Sprintf("some constants are missing from .rodata: %s", strings.Join(m.Constants, ", "))
+}
+
 // RewriteConstants replaces the value of multiple constants.
 //
 // The constant must be defined like so in the C program:
@@ -120,7 +133,7 @@ func (cs *CollectionSpec) RewriteMaps(maps map[string]*Map) error {
 //
 // From Linux 5.5 the verifier will use constants to eliminate dead code.
 //
-// Returns an error if a constant doesn't exist.
+// Returns an error wrapping [MissingConstantsError] if a constant doesn't exist.
 func (cs *CollectionSpec) RewriteConstants(consts map[string]interface{}) error {
 	replaced := make(map[string]bool)
 
@@ -163,12 +176,12 @@ func (cs *CollectionSpec) RewriteConstants(consts map[string]interface{}) error 
 				return fmt.Errorf("section %s: offset %d(+%d) for variable %s is out of bounds", name, v.Offset, v.Size, vname)
 			}
 
-			b, err := marshalBytes(replacement, int(v.Size))
+			b, err := sysenc.Marshal(replacement, int(v.Size))
 			if err != nil {
 				return fmt.Errorf("marshaling constant replacement %s: %w", vname, err)
 			}
 
-			copy(cpy[v.Offset:v.Offset+v.Size], b)
+			b.CopyTo(cpy[v.Offset : v.Offset+v.Size])
 
 			replaced[vname] = true
 		}
@@ -184,7 +197,7 @@ func (cs *CollectionSpec) RewriteConstants(consts map[string]interface{}) error 
 	}
 
 	if len(missing) != 0 {
-		return fmt.Errorf("spec is missing one or more constants: %s", strings.Join(missing, ","))
+		return fmt.Errorf("rewrite constants: %w", &MissingConstantsError{Constants: missing})
 	}
 
 	return nil
@@ -296,7 +309,7 @@ func (cs *CollectionSpec) LoadAndAssign(to interface{}, opts *CollectionOptions)
 	}
 
 	// Populate the requested maps. Has a chance of lazy-loading other dependent maps.
-	if err := loader.populateMaps(); err != nil {
+	if err := loader.populateDeferredMaps(); err != nil {
 		return err
 	}
 
@@ -376,7 +389,7 @@ func NewCollectionWithOptions(spec *CollectionSpec, opts CollectionOptions) (*Co
 
 	// Maps can contain Program and Map stubs, so populate them after
 	// all Maps and Programs have been successfully loaded.
-	if err := loader.populateMaps(); err != nil {
+	if err := loader.populateDeferredMaps(); err != nil {
 		return nil, err
 	}
 
@@ -458,6 +471,15 @@ func (cl *collectionLoader) loadMap(mapName string) (*Map, error) {
 		return nil, fmt.Errorf("map %s: %w", mapName, err)
 	}
 
+	// Finalize 'scalar' maps that don't refer to any other eBPF resources
+	// potentially pending creation. This is needed for frozen maps like .rodata
+	// that need to be finalized before invoking the verifier.
+	if !mapSpec.Type.canStoreMapOrProgram() {
+		if err := m.finalize(mapSpec); err != nil {
+			return nil, fmt.Errorf("finalizing map %s: %w", mapName, err)
+		}
+	}
+
 	cl.maps[mapName] = m
 	return m, nil
 }
@@ -515,44 +537,50 @@ func (cl *collectionLoader) loadProgram(progName string) (*Program, error) {
 	return prog, nil
 }
 
-func (cl *collectionLoader) populateMaps() error {
+// populateDeferredMaps iterates maps holding programs or other maps and loads
+// any dependencies. Populates all maps in cl and freezes them if specified.
+func (cl *collectionLoader) populateDeferredMaps() error {
 	for mapName, m := range cl.maps {
 		mapSpec, ok := cl.coll.Maps[mapName]
 		if !ok {
 			return fmt.Errorf("missing map spec %s", mapName)
 		}
 
+		// Scalar maps without Map or Program references are finalized during
+		// creation. Don't finalize them again.
+		if !mapSpec.Type.canStoreMapOrProgram() {
+			continue
+		}
+
+		mapSpec = mapSpec.Copy()
+
 		// MapSpecs that refer to inner maps or programs within the same
 		// CollectionSpec do so using strings. These strings are used as the key
 		// to look up the respective object in the Maps or Programs fields.
 		// Resolve those references to actual Map or Program resources that
 		// have been loaded into the kernel.
-		if mapSpec.Type.canStoreMap() || mapSpec.Type.canStoreProgram() {
-			mapSpec = mapSpec.Copy()
+		for i, kv := range mapSpec.Contents {
+			objName, ok := kv.Value.(string)
+			if !ok {
+				continue
+			}
 
-			for i, kv := range mapSpec.Contents {
-				objName, ok := kv.Value.(string)
-				if !ok {
-					continue
+			switch t := mapSpec.Type; {
+			case t.canStoreProgram():
+				// loadProgram is idempotent and could return an existing Program.
+				prog, err := cl.loadProgram(objName)
+				if err != nil {
+					return fmt.Errorf("loading program %s, for map %s: %w", objName, mapName, err)
 				}
+				mapSpec.Contents[i] = MapKV{kv.Key, prog}
 
-				switch t := mapSpec.Type; {
-				case t.canStoreProgram():
-					// loadProgram is idempotent and could return an existing Program.
-					prog, err := cl.loadProgram(objName)
-					if err != nil {
-						return fmt.Errorf("loading program %s, for map %s: %w", objName, mapName, err)
-					}
-					mapSpec.Contents[i] = MapKV{kv.Key, prog}
-
-				case t.canStoreMap():
-					// loadMap is idempotent and could return an existing Map.
-					innerMap, err := cl.loadMap(objName)
-					if err != nil {
-						return fmt.Errorf("loading inner map %s, for map %s: %w", objName, mapName, err)
-					}
-					mapSpec.Contents[i] = MapKV{kv.Key, innerMap}
+			case t.canStoreMap():
+				// loadMap is idempotent and could return an existing Map.
+				innerMap, err := cl.loadMap(objName)
+				if err != nil {
+					return fmt.Errorf("loading inner map %s, for map %s: %w", objName, mapName, err)
 				}
+				mapSpec.Contents[i] = MapKV{kv.Key, innerMap}
 			}
 		}
 
@@ -561,6 +589,95 @@ func (cl *collectionLoader) populateMaps() error {
 			return fmt.Errorf("populating map %s: %w", mapName, err)
 		}
 	}
+
+	return nil
+}
+
+// resolveKconfig resolves all variables declared in .kconfig and populates
+// m.Contents. Does nothing if the given m.Contents is non-empty.
+func resolveKconfig(m *MapSpec) error {
+	ds, ok := m.Value.(*btf.Datasec)
+	if !ok {
+		return errors.New("map value is not a Datasec")
+	}
+
+	type configInfo struct {
+		offset uint32
+		typ    btf.Type
+	}
+
+	configs := make(map[string]configInfo)
+
+	data := make([]byte, ds.Size)
+	for _, vsi := range ds.Vars {
+		v := vsi.Type.(*btf.Var)
+		n := v.TypeName()
+
+		switch n {
+		case "LINUX_KERNEL_VERSION":
+			if integer, ok := v.Type.(*btf.Int); !ok || integer.Size != 4 {
+				return fmt.Errorf("variable %s must be a 32 bits integer, got %s", n, v.Type)
+			}
+
+			kv, err := internal.KernelVersion()
+			if err != nil {
+				return fmt.Errorf("getting kernel version: %w", err)
+			}
+			internal.NativeEndian.PutUint32(data[vsi.Offset:], kv.Kernel())
+
+		case "LINUX_HAS_SYSCALL_WRAPPER":
+			if integer, ok := v.Type.(*btf.Int); !ok || integer.Size != 4 {
+				return fmt.Errorf("variable %s must be a 32 bits integer, got %s", n, v.Type)
+			}
+			var value uint32 = 1
+			if err := haveSyscallWrapper(); errors.Is(err, ErrNotSupported) {
+				value = 0
+			} else if err != nil {
+				return fmt.Errorf("unable to derive a value for LINUX_HAS_SYSCALL_WRAPPER: %w", err)
+			}
+
+			internal.NativeEndian.PutUint32(data[vsi.Offset:], value)
+
+		default: // Catch CONFIG_*.
+			configs[n] = configInfo{
+				offset: vsi.Offset,
+				typ:    v.Type,
+			}
+		}
+	}
+
+	// We only parse kconfig file if a CONFIG_* variable was found.
+	if len(configs) > 0 {
+		f, err := kconfig.Find()
+		if err != nil {
+			return fmt.Errorf("cannot find a kconfig file: %w", err)
+		}
+		defer f.Close()
+
+		filter := make(map[string]struct{}, len(configs))
+		for config := range configs {
+			filter[config] = struct{}{}
+		}
+
+		kernelConfig, err := kconfig.Parse(f, filter)
+		if err != nil {
+			return fmt.Errorf("cannot parse kconfig file: %w", err)
+		}
+
+		for n, info := range configs {
+			value, ok := kernelConfig[n]
+			if !ok {
+				return fmt.Errorf("config option %q does not exists for this kernel", n)
+			}
+
+			err := kconfig.PutValue(data[info.offset:], info.typ, value)
+			if err != nil {
+				return fmt.Errorf("problem adding value for %s: %w", n, err)
+			}
+		}
+	}
+
+	m.Contents = []MapKV{{uint32(0), data}}
 
 	return nil
 }

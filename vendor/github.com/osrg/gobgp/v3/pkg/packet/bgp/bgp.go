@@ -32,8 +32,21 @@ import (
 )
 
 type MarshallingOption struct {
-	AddPath    map[RouteFamily]BGPAddPathMode
-	Attributes map[BGPAttrType]bool
+	AddPath        map[RouteFamily]BGPAddPathMode
+	Attributes     map[BGPAttrType]bool
+	ImplicitPrefix AddrPrefixInterface
+}
+
+// GetImplicitPrefix gets the implicit prefix associated with decoding/serialisation. This is used for
+// the MRT representation of MP_REACH_NLRI (see RFC 6396 4.3.4).
+func GetImplicitPrefix(options []*MarshallingOption) AddrPrefixInterface {
+	for _, opt := range options {
+		if opt != nil && opt.ImplicitPrefix != nil {
+			return opt.ImplicitPrefix
+		}
+	}
+
+	return nil
 }
 
 func IsAddPathEnabled(decode bool, f RouteFamily, options []*MarshallingOption) bool {
@@ -1764,7 +1777,7 @@ func GetRouteDistinguisher(data []byte) RouteDistinguisherInterface {
 func parseRdAndRt(input string) ([]string, error) {
 	elems := _regexpRouteDistinguisher.FindStringSubmatch(input)
 	if len(elems) != 11 {
-		return nil, errors.New("failed to parse")
+		return nil, fmt.Errorf("failed to parse RD %q", input)
 	}
 	return elems, nil
 }
@@ -1788,6 +1801,29 @@ func ParseRouteDistinguisher(rd string) (RouteDistinguisherInterface, error) {
 		asn := fst<<16 | snd
 		return NewRouteDistinguisherFourOctetAS(uint32(asn), uint16(assigned)), nil
 	}
+}
+
+// ParseVPNPrefix parses VPNv4/VPNv6 prefix.
+func ParseVPNPrefix(prefix string) (RouteDistinguisherInterface, net.IP, *net.IPNet, error) {
+	elems := strings.SplitN(prefix, ":", 3)
+	if len(elems) < 3 {
+		return nil, nil, nil, fmt.Errorf("invalid VPN prefix format: %q", prefix)
+	}
+
+	rd, err := ParseRouteDistinguisher(elems[0] + ":" + elems[1])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	addr, network, err := net.ParseCIDR(elems[2])
+	return rd, addr, network, err
+}
+
+// ContainsCIDR checks if one IPNet is a subnet of another.
+func ContainsCIDR(n1, n2 *net.IPNet) bool {
+	ones1, _ := n1.Mask.Size()
+	ones2, _ := n2.Mask.Size()
+	return ones1 <= ones2 && n1.Contains(n2.IP)
 }
 
 //
@@ -4374,12 +4410,9 @@ func NewFlowSpecComponentItem(op uint8, value uint64) *FlowSpecComponentItem {
 					return uint32(i)
 				}
 			}
-			// return invalid order
-			return 4
+			// Return 8 octet order
+			return 3
 		}()
-	}
-	if order > 3 {
-		return nil
 	}
 	v.Op = uint8(uint32(v.Op) | order<<4)
 	return v
@@ -6917,8 +6950,14 @@ func (l *LsTLVBgpRouterID) DecodeFromBytes(data []byte) error {
 }
 
 func (l *LsTLVBgpRouterID) Serialize() ([]byte, error) {
-	var buf [4]byte
-	copy(buf[:], l.RouterID)
+	tmpaddr := l.RouterID
+	if tmpaddr.To4() != nil {
+		var buf [4]byte
+		copy(buf[:], l.RouterID.To4())
+		return l.LsTLV.Serialize(buf[:])
+	}
+	var buf [16]byte
+	copy(buf[:], l.RouterID.To16())
 	return l.LsTLV.Serialize(buf[:])
 }
 
@@ -7937,7 +7976,7 @@ func NewLsTLVAdjacencySID(l *uint32) *LsTLVAdjacencySID {
 	var flags uint8
 	return &LsTLVAdjacencySID{
 		LsTLV: LsTLV{
-			Type:   BGP_ASPATH_ATTR_TYPE_SET,
+			Type:   LS_TLV_ADJACENCY_SID,
 			Length: 7, // TODO: Implementation to judge 7 octets or 8 octets
 		},
 		Flags:  flags,
@@ -8069,7 +8108,7 @@ type LsTLVPeerNodeSID struct {
 func NewLsTLVPeerNodeSID(l *LsBgpPeerSegmentSID) *LsTLVPeerNodeSID {
 	return &LsTLVPeerNodeSID{
 		LsTLV: LsTLV{
-			Type:   BGP_ASPATH_ATTR_TYPE_SET,
+			Type:   LS_TLV_PEER_NODE_SID,
 			Length: l.Flags.SidLen(),
 		},
 		Flags:  l.Flags.FlagBits(),
@@ -8160,7 +8199,7 @@ type LsTLVPeerAdjacencySID struct {
 func NewLsTLVPeerAdjacencySID(l *LsBgpPeerSegmentSID) *LsTLVPeerAdjacencySID {
 	return &LsTLVPeerAdjacencySID{
 		LsTLV: LsTLV{
-			Type:   BGP_ASPATH_ATTR_TYPE_SET,
+			Type:   LS_TLV_ADJACENCY_SID,
 			Length: l.Flags.SidLen(),
 		},
 		Flags:  l.Flags.FlagBits(),
@@ -8251,7 +8290,7 @@ type LsTLVPeerSetSID struct {
 func NewLsTLVPeerSetSID(l *LsBgpPeerSegmentSID) *LsTLVPeerSetSID {
 	return &LsTLVPeerSetSID{
 		LsTLV: LsTLV{
-			Type:   BGP_ASPATH_ATTR_TYPE_SET,
+			Type:   LS_TLV_PEER_SET_SID,
 			Length: l.Flags.SidLen(),
 		},
 		Flags:  l.Flags.FlagBits(),
@@ -9565,33 +9604,70 @@ func GetRouteFamily(name string) (RouteFamily, error) {
 func NewPrefixFromRouteFamily(afi uint16, safi uint8, prefixStr ...string) (prefix AddrPrefixInterface, err error) {
 	family := AfiSafiToRouteFamily(afi, safi)
 
-	f := func(s string) AddrPrefixInterface {
-		addr, net, _ := net.ParseCIDR(s)
+	f := func(s string) (AddrPrefixInterface, error) {
+		addr, net, err := net.ParseCIDR(s)
+		if err != nil {
+			return nil, err
+		}
 		len, _ := net.Mask.Size()
 		switch family {
 		case RF_IPv4_UC, RF_IPv4_MC:
-			return NewIPAddrPrefix(uint8(len), addr.String())
+			return NewIPAddrPrefix(uint8(len), addr.String()), nil
 		}
-		return NewIPv6AddrPrefix(uint8(len), addr.String())
+		return NewIPv6AddrPrefix(uint8(len), addr.String()), nil
 	}
 
 	switch family {
 	case RF_IPv4_UC, RF_IPv4_MC:
 		if len(prefixStr) > 0 {
-			prefix = f(prefixStr[0])
+			prefix, err = f(prefixStr[0])
 		} else {
 			prefix = NewIPAddrPrefix(0, "")
 		}
 	case RF_IPv6_UC, RF_IPv6_MC:
 		if len(prefixStr) > 0 {
-			prefix = f(prefixStr[0])
+			prefix, err = f(prefixStr[0])
 		} else {
 			prefix = NewIPv6AddrPrefix(0, "")
 		}
 	case RF_IPv4_VPN:
-		prefix = NewLabeledVPNIPAddrPrefix(0, "", *NewMPLSLabelStack(), nil)
+		if len(prefixStr) == 0 {
+			prefix = NewLabeledVPNIPAddrPrefix(0, "", *NewMPLSLabelStack(), nil)
+			break
+		}
+
+		rd, addr, network, err := ParseVPNPrefix(prefixStr[0])
+		if err != nil {
+			return nil, err
+		}
+
+		length, _ := network.Mask.Size()
+
+		prefix = NewLabeledVPNIPAddrPrefix(
+			uint8(length),
+			addr.String(),
+			*NewMPLSLabelStack(),
+			rd,
+		)
 	case RF_IPv6_VPN:
-		prefix = NewLabeledVPNIPv6AddrPrefix(0, "", *NewMPLSLabelStack(), nil)
+		if len(prefixStr) == 0 {
+			prefix = NewLabeledVPNIPv6AddrPrefix(0, "", *NewMPLSLabelStack(), nil)
+			break
+		}
+
+		rd, addr, network, err := ParseVPNPrefix(prefixStr[0])
+		if err != nil {
+			return nil, err
+		}
+
+		length, _ := network.Mask.Size()
+
+		prefix = NewLabeledVPNIPv6AddrPrefix(
+			uint8(length),
+			addr.String(),
+			*NewMPLSLabelStack(),
+			rd,
+		)
 	case RF_IPv4_MPLS:
 		prefix = NewLabeledIPAddrPrefix(0, "", *NewMPLSLabelStack())
 	case RF_IPv6_MPLS:
@@ -10364,7 +10440,7 @@ func (p *PathAttributeAsPath) String() string {
 	for _, param := range p.Value {
 		params = append(params, param.String())
 	}
-	return strings.Join(params, " ")
+	return "{AsPath: " + strings.Join(params, " ") + "}"
 }
 
 func (p *PathAttributeAsPath) MarshalJSON() ([]byte, error) {
@@ -10949,19 +11025,35 @@ func (p *PathAttributeMpReachNLRI) DecodeFromBytes(data []byte, options ...*Mars
 	if p.Length < 3 {
 		return NewMessageError(eCode, eSubCode, value, "mpreach header length is short")
 	}
-	afi := binary.BigEndian.Uint16(value[0:2])
-	safi := value[2]
+
+	var afi uint16
+	var safi uint8
+
+	// In MRT dumps, AFI+SAFI+NLRI is implicit based on RIB Entry Header, see RFC 6396 4.3.4
+	implicitPrefix := GetImplicitPrefix(options)
+	if implicitPrefix == nil {
+		afi = binary.BigEndian.Uint16(value[0:2])
+		safi = value[2]
+
+		value = value[3:]
+	} else {
+		afi = implicitPrefix.AFI()
+		safi = implicitPrefix.SAFI()
+
+		p.Value = []AddrPrefixInterface{implicitPrefix}
+	}
+
 	p.AFI = afi
 	p.SAFI = safi
 	_, err = NewPrefixFromRouteFamily(afi, safi)
 	if err != nil {
 		return NewMessageError(eCode, BGP_ERROR_SUB_INVALID_NETWORK_FIELD, eData, err.Error())
 	}
-	nexthoplen := int(value[3])
-	if len(value) < 4+nexthoplen {
+	nexthoplen := int(value[0])
+	if len(value) < 1+nexthoplen {
 		return NewMessageError(eCode, eSubCode, value, "mpreach nexthop length is short")
 	}
-	nexthopbin := value[4 : 4+nexthoplen]
+	nexthopbin := value[1 : 1+nexthoplen]
 	if nexthoplen > 0 {
 		v4addrlen := 4
 		v6addrlen := 16
@@ -10981,7 +11073,13 @@ func (p *PathAttributeMpReachNLRI) DecodeFromBytes(data []byte, options ...*Mars
 			return NewMessageError(eCode, eSubCode, value, "mpreach nexthop length is incorrect")
 		}
 	}
-	value = value[4+nexthoplen:]
+
+	// NLRI implicit for MRT dumps
+	if implicitPrefix != nil {
+		return nil
+	}
+
+	value = value[1+nexthoplen:]
 	// skip reserved
 	if len(value) == 0 {
 		return NewMessageError(eCode, eSubCode, value, "no skip byte")
@@ -11027,27 +11125,40 @@ func (p *PathAttributeMpReachNLRI) Serialize(options ...*MarshallingOption) ([]b
 	if p.LinkLocalNexthop != nil && p.LinkLocalNexthop.IsLinkLocalUnicast() {
 		nexthoplen = BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL
 	}
-	buf := make([]byte, 4+nexthoplen)
-	binary.BigEndian.PutUint16(buf[0:], afi)
-	buf[2] = safi
-	buf[3] = uint8(nexthoplen)
+	var buf []byte
+	includeNLRI := GetImplicitPrefix(options) == nil
+	if includeNLRI {
+		family := make([]byte, 3)
+		binary.BigEndian.PutUint16(family[0:], afi)
+		family[2] = safi
+
+		buf = append(buf, family...)
+	}
+	buf = append(buf, uint8(nexthoplen))
 	if nexthoplen != 0 {
+		nexthop := make([]byte, nexthoplen)
+
 		if p.Nexthop.To4() == nil {
-			copy(buf[4+offset:], p.Nexthop.To16())
+			copy(nexthop[offset:], p.Nexthop.To16())
+
 			if nexthoplen == BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL {
-				copy(buf[4+offset+16:], p.LinkLocalNexthop.To16())
+				copy(nexthop[offset+16:], p.LinkLocalNexthop.To16())
 			}
 		} else {
-			copy(buf[4+offset:], p.Nexthop)
+			copy(nexthop[offset:], p.Nexthop)
 		}
+
+		buf = append(buf, nexthop...)
 	}
-	buf = append(buf, 0)
-	for _, prefix := range p.Value {
-		pbuf, err := prefix.Serialize(options...)
-		if err != nil {
-			return nil, err
+	if includeNLRI {
+		buf = append(buf, 0)
+		for _, prefix := range p.Value {
+			pbuf, err := prefix.Serialize(options...)
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, pbuf...)
 		}
-		buf = append(buf, pbuf...)
 	}
 	return p.PathAttribute.Serialize(buf, options...)
 }

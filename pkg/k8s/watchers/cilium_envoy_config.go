@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy/api"
 
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -36,7 +37,7 @@ func (k *K8sWatcher) ciliumEnvoyConfigInit(ctx context.Context, ciliumNPClient c
 			AddFunc: func(obj interface{}) {
 				var valid, equal bool
 				defer func() { k.K8sEventReceived(apiGroup, metricCEC, resources.MetricCreate, valid, equal) }()
-				if cec := k8s.ObjToCEC(obj); cec != nil {
+				if cec := k8s.CastInformerEvent[cilium_v2.CiliumEnvoyConfig](obj); cec != nil {
 					valid = true
 					err := k.addCiliumEnvoyConfig(cec)
 					k.K8sEventProcessed(metricCEC, resources.MetricCreate, err == nil)
@@ -46,8 +47,8 @@ func (k *K8sWatcher) ciliumEnvoyConfigInit(ctx context.Context, ciliumNPClient c
 				var valid, equal bool
 				defer func() { k.K8sEventReceived(apiGroup, metricCEC, resources.MetricUpdate, valid, equal) }()
 
-				if oldCEC := k8s.ObjToCEC(oldObj); oldCEC != nil {
-					if newCEC := k8s.ObjToCEC(newObj); newCEC != nil {
+				if oldCEC := k8s.CastInformerEvent[cilium_v2.CiliumEnvoyConfig](oldObj); oldCEC != nil {
+					if newCEC := k8s.CastInformerEvent[cilium_v2.CiliumEnvoyConfig](newObj); newCEC != nil {
 						valid = true
 						if newCEC.DeepEqual(oldCEC) {
 							equal = true
@@ -61,7 +62,7 @@ func (k *K8sWatcher) ciliumEnvoyConfigInit(ctx context.Context, ciliumNPClient c
 			DeleteFunc: func(obj interface{}) {
 				var valid, equal bool
 				defer func() { k.K8sEventReceived(apiGroup, metricCEC, resources.MetricDelete, valid, equal) }()
-				cec := k8s.ObjToCEC(obj)
+				cec := k8s.CastInformerEvent[cilium_v2.CiliumEnvoyConfig](obj)
 				if cec == nil {
 					return
 				}
@@ -70,7 +71,7 @@ func (k *K8sWatcher) ciliumEnvoyConfigInit(ctx context.Context, ciliumNPClient c
 				k.K8sEventProcessed(metricCEC, resources.MetricDelete, err == nil)
 			},
 		},
-		k8s.ConvertToCiliumEnvoyConfig,
+		nil,
 	)
 
 	k.blockWaitGroupToSyncResources(
@@ -84,10 +85,10 @@ func (k *K8sWatcher) ciliumEnvoyConfigInit(ctx context.Context, ciliumNPClient c
 	k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumEnvoyConfigV2)
 }
 
-// isIngressKind returns true if any of the OwnerReferences is Kind "Ingress"
-func isIngressKind(meta *meta_v1.ObjectMeta) bool {
+// isCiliumIngress returns true if the given object metadata indicates that the owner needs the Envoy listener to assume the identity of Cilium Ingress. Currently this is the case when any of the OwnerReferences is Kind "Ingress" or "Gateway".
+func isCiliumIngress(meta *meta_v1.ObjectMeta) bool {
 	for _, owner := range meta.OwnerReferences {
-		if owner.Kind == "Ingress" {
+		if owner.Kind == "Ingress" || owner.Kind == "Gateway" {
 			return true
 		}
 	}
@@ -109,7 +110,7 @@ func (k *K8sWatcher) addCiliumEnvoyConfig(cec *cilium_v2.CiliumEnvoyConfig) erro
 		true,
 		k.envoyConfigManager,
 		len(cec.Spec.Services) > 0,
-		!isIngressKind(&cec.ObjectMeta),
+		!isCiliumIngress(&cec.ObjectMeta),
 	)
 	if err != nil {
 		scopedLog.WithError(err).Warn("Failed to add CiliumEnvoyConfig: malformed Envoy config")
@@ -163,10 +164,15 @@ func getServiceName(resourceName loadbalancer.ServiceName, name, namespace strin
 func (k *K8sWatcher) addK8sServiceRedirects(resourceName loadbalancer.ServiceName, spec *cilium_v2.CiliumEnvoyConfigSpec, resources envoy.Resources) error {
 	// Redirect k8s services to an Envoy listener
 	for _, svc := range spec.Services {
+		svcListener := ""
+		if svc.Listener != "" {
+			// Listener names are qualified after parsing, so qualify the listener reference as well for it to match
+			svcListener = api.ResourceQualifiedName(resourceName.Namespace, resourceName.Name, svc.Listener, api.ForceNamespace)
+		}
 		// Find the listener the service is to be redirected to
 		var proxyPort uint16
 		for _, l := range resources.Listeners {
-			if svc.Listener == "" || l.Name == svc.Listener {
+			if svc.Listener == "" || l.Name == svcListener {
 				if addr := l.GetAddress(); addr != nil {
 					if sa := addr.GetSocketAddress(); sa != nil {
 						proxyPort = uint16(sa.GetPortValue())
@@ -213,7 +219,7 @@ func (k *K8sWatcher) updateCiliumEnvoyConfig(oldCEC *cilium_v2.CiliumEnvoyConfig
 		false,
 		k.envoyConfigManager,
 		len(oldCEC.Spec.Services) > 0,
-		!isIngressKind(&oldCEC.ObjectMeta),
+		!isCiliumIngress(&oldCEC.ObjectMeta),
 	)
 	if err != nil {
 		scopedLog.WithError(err).Warn("Failed to update CiliumEnvoyConfig: malformed old Envoy config")
@@ -226,7 +232,7 @@ func (k *K8sWatcher) updateCiliumEnvoyConfig(oldCEC *cilium_v2.CiliumEnvoyConfig
 		true,
 		k.envoyConfigManager,
 		len(newCEC.Spec.Services) > 0,
-		!isIngressKind(&newCEC.ObjectMeta),
+		!isCiliumIngress(&newCEC.ObjectMeta),
 	)
 	if err != nil {
 		scopedLog.WithError(err).Warn("Failed to update CiliumEnvoyConfig: malformed new Envoy config")
@@ -332,7 +338,7 @@ func (k *K8sWatcher) deleteCiliumEnvoyConfig(cec *cilium_v2.CiliumEnvoyConfig) e
 		false,
 		k.envoyConfigManager,
 		len(cec.Spec.Services) > 0,
-		!isIngressKind(&cec.ObjectMeta),
+		!isCiliumIngress(&cec.ObjectMeta),
 	)
 	if err != nil {
 		scopedLog.WithError(err).Warn("Failed to delete CiliumEnvoyConfig: parsing rersource names failed")

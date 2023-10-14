@@ -5,13 +5,14 @@ package api
 
 import (
 	"fmt"
+	"testing"
 
 	. "github.com/cilium/checkmate"
+	"github.com/cilium/proxy/pkg/policy/api/kafka"
 
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/policy/api/kafka"
 )
 
 // This test ensures that only PortRules which have L7Rules associated with them
@@ -627,7 +628,7 @@ func (s *PolicyAPITestSuite) TestToServicesSanitize(c *C) {
 	}
 
 	err := toServicesL3L4.Sanitize()
-	c.Assert(err, IsNil)
+	c.Assert(err, NotNil)
 
 }
 
@@ -1073,4 +1074,22 @@ func (s *PolicyAPITestSuite) TestL7RuleDirectionalitySupport(c *C) {
 	err = invalidDNSRule.Sanitize()
 	c.Assert(err, Not(IsNil))
 
+}
+
+func BenchmarkCIDRSanitize(b *testing.B) {
+	cidr4 := CIDRRule{Cidr: "192.168.100.200/24"}
+	cidr6 := CIDRRule{Cidr: "2001:0db8:85a3:0000:0000:8a2e:0370:7334/128"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := cidr4.sanitize()
+		if err != nil {
+			b.Fatal(err)
+		}
+		_, err = cidr6.sanitize()
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
 }

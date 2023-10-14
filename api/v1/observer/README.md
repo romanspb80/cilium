@@ -12,8 +12,11 @@
     - [GetFlowsRequest](#observer-GetFlowsRequest)
     - [GetFlowsRequest.Experimental](#observer-GetFlowsRequest-Experimental)
     - [GetFlowsResponse](#observer-GetFlowsResponse)
+    - [GetNamespacesRequest](#observer-GetNamespacesRequest)
+    - [GetNamespacesResponse](#observer-GetNamespacesResponse)
     - [GetNodesRequest](#observer-GetNodesRequest)
     - [GetNodesResponse](#observer-GetNodesResponse)
+    - [Namespace](#observer-Namespace)
     - [Node](#observer-Node)
     - [ServerStatusRequest](#observer-ServerStatusRequest)
     - [ServerStatusResponse](#observer-ServerStatusResponse)
@@ -142,6 +145,7 @@ GetDebugEventsResponse contains a Cilium datapath debug events.
 | since | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  | Since this time for returned flows. Incompatible with `number`. |
 | until | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  | Until this time for returned flows. Incompatible with `number`. |
 | experimental | [GetFlowsRequest.Experimental](#observer-GetFlowsRequest-Experimental) |  |  |
+| extensions | [google.protobuf.Any](#google-protobuf-Any) |  | extensions can be used to add arbitrary additional metadata to GetFlowsRequest. This can be used to extend functionality for other Hubble compatible APIs, or experiment with new functionality without needing to change the public API. |
 
 
 
@@ -183,6 +187,31 @@ GetFlowsResponse contains either a flow or a protocol message.
 
 
 
+<a name="observer-GetNamespacesRequest"></a>
+
+### GetNamespacesRequest
+
+
+
+
+
+
+
+<a name="observer-GetNamespacesResponse"></a>
+
+### GetNamespacesResponse
+GetNamespacesResponse contains the list of namespaces.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| namespaces | [Namespace](#observer-Namespace) | repeated | Namespaces is a list of namespaces with flows |
+
+
+
+
+
+
 <a name="observer-GetNodesRequest"></a>
 
 ### GetNodesRequest
@@ -202,6 +231,22 @@ GetNodesResponse contains the list of nodes.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | nodes | [Node](#observer-Node) | repeated | Nodes is an exhaustive list of nodes. |
+
+
+
+
+
+
+<a name="observer-Namespace"></a>
+
+### Namespace
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| cluster | [string](#string) |  |  |
+| namespace | [string](#string) |  |  |
 
 
 
@@ -257,6 +302,7 @@ Node represents a cluster node.
 | num_unavailable_nodes | [google.protobuf.UInt32Value](#google-protobuf-UInt32Value) |  | number of nodes for which a connection cannot be established |
 | unavailable_nodes | [string](#string) | repeated | list of nodes that are unavailable This list may not be exhaustive. |
 | version | [string](#string) |  | Version is the version of Cilium/Hubble. |
+| flows_rate | [double](#double) |  | Approximate rate of flows seen by Hubble per second over the last minute. In a multi-node context, this is the sum of all flows rates. |
 
 
 
@@ -297,6 +343,7 @@ to observe.
 | GetAgentEvents | [GetAgentEventsRequest](#observer-GetAgentEventsRequest) | [GetAgentEventsResponse](#observer-GetAgentEventsResponse) stream | GetAgentEvents returns Cilium agent events. |
 | GetDebugEvents | [GetDebugEventsRequest](#observer-GetDebugEventsRequest) | [GetDebugEventsResponse](#observer-GetDebugEventsResponse) stream | GetDebugEvents returns Cilium datapath debug events. |
 | GetNodes | [GetNodesRequest](#observer-GetNodesRequest) | [GetNodesResponse](#observer-GetNodesResponse) | GetNodes returns information about nodes in a cluster. |
+| GetNamespaces | [GetNamespacesRequest](#observer-GetNamespacesRequest) | [GetNamespacesResponse](#observer-GetNamespacesResponse) | GetNamespaces returns information about namespaces in a cluster. The namespaces returned are namespaces which have had network flows in the last hour. The namespaces are returned sorted by cluster name and namespace in ascending order. |
 | ServerStatus | [ServerStatusRequest](#observer-ServerStatusRequest) | [ServerStatusResponse](#observer-ServerStatusResponse) | ServerStatus returns some details about the running hubble server. |
 
  

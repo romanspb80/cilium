@@ -8,7 +8,10 @@
   // This ensures that the gitAuthor and gitSignOff fields match
   "gitAuthor": "renovate[bot] <bot@renovateapp.com>",
   "includePaths": [
+    ".github/actions/ginkgo/**",
     ".github/workflows/**",
+    ".github/kind-config.yaml",
+    ".github/kind-config-ipv6.yaml",
     "images/**",
     "examples/hubble/*",
     "go.mod",
@@ -45,9 +48,9 @@
   "pruneStaleBranches": true,
   "baseBranches": [
     "main",
+    "v1.14",
     "v1.13",
-    "v1.12",
-    "v1.11"
+    "v1.12"
   ],
   "vulnerabilityAlerts": {
     "enabled": true
@@ -65,6 +68,10 @@
       "matchPaths": [
         ".github/workflows/**"
       ],
+      excludeDepNames: [
+        "quay.io/lvh-images/kind",
+        "quay.io/cilium/kindest-node"
+      ],
       "matchUpdateTypes": [
         "major",
         "minor",
@@ -74,8 +81,17 @@
         "pinDigest"
       ],
       "schedule": [
-        "on friday"
+        "on monday"
       ]
+    },
+    {
+      "matchPaths": [
+        ".github/workflows/integration-test.yaml"
+      ],
+      matchPackageNames: [
+        "ubuntu"
+      ],
+      "allowedVersions": "20.04",
     },
     {
       "groupName": "all go dependencies main",
@@ -97,7 +113,7 @@
         "pinDigest"
       ],
       "schedule": [
-        "on friday"
+        "on monday"
       ],
       matchBaseBranches: [
         "main"
@@ -113,9 +129,9 @@
         "go.sum"
       ],
       matchBaseBranches: [
+        "v1.14",
         "v1.13",
-        "v1.12",
-        "v1.11"
+        "v1.12"
       ]
     },
     {
@@ -131,12 +147,20 @@
         "github.com/cilium/dns",
         "sigs.k8s.io/controller-tools",
         "github.com/cilium/controller-tools",
+        "github.com/cilium/client-go",
         // We update this dependency manually together with envoy proxy updates
         "github.com/cilium/proxy",
       ],
       "matchPackagePatterns": [
+        // We can't update these libraries until github.com/shoenig/go-m1cpu
+        // is added as an exception to the list of licenses into CNCF.
+        ".*google/gops/*",
+        // We can't update these libraries until github.com/shoenig/go-m1cpu
+        // is added as an exception to the list of licenses into CNCF.
+        "github.com/shirou/gopsutil/*",
         // Once we decide to spend cycles on ginkgo v2 we should update the
         // dependency manually.
+        "github.com/onsi/ginkgo",
         "github.com/onsi/gomega/*",
         // k8s dependencies will be updated manually along with tests
         "k8s.io/*",
@@ -149,8 +173,11 @@
         "images/builder/Dockerfile",
         "images/runtime/Dockerfile"
       ],
+      "matchPackageNames": [
+        "docker.io/library/golang"
+      ],
       "schedule": [
-        "on friday"
+        "on monday"
       ]
     },
     {
@@ -161,10 +188,11 @@
         "images/cilium-docker-plugin/Dockerfile",
         "images/clustermesh-apiserver/Dockerfile",
         "images/hubble-relay/Dockerfile",
-        "images/operator/Dockerfile"
+        "images/operator/Dockerfile",
+        "images/kvstoremesh/Dockerfile"
       ],
       "schedule": [
-        "on friday"
+        "on monday"
       ]
     },
     {
@@ -174,11 +202,41 @@
         "contrib/coccinelle/Dockerfile",
         "images/cache/Dockerfile",
         "images/clustermesh-apiserver/Dockerfile",
-        "images/operator/Dockerfile"
+        "images/hubble-relay/Dockerfile",
+        "images/operator/Dockerfile",
+        "images/kvstoremesh/Dockerfile"
       ],
       "schedule": [
-        "on friday"
+        "on monday"
       ]
+    },
+    {
+      "groupName": "spire-images",
+      "matchFiles": [
+        "install/kubernetes/cilium/values.yaml.tmpl"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/spiffe/spire-agent",
+        "ghcr.io/spiffe/spire-server"
+      ],
+      "matchBaseBranches": [
+        "main",
+      ],
+      "allowedVersions": ">1.6",
+    },
+    {
+      "groupName": "spire-images",
+      "matchFiles": [
+        "install/kubernetes/cilium/values.yaml.tmpl"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/spiffe/spire-agent",
+        "ghcr.io/spiffe/spire-server"
+      ],
+      "matchBaseBranches": [
+        "v1.14",
+      ],
+      "allowedVersions": "<1.7",
     },
     {
       "matchPackageNames": [
@@ -187,6 +245,7 @@
       "allowedVersions": "22.04",
       "matchBaseBranches": [
         "main",
+        "v1.14",
         "v1.13"
       ]
     },
@@ -196,15 +255,14 @@
       ],
       "allowedVersions": "20.04",
       "matchBaseBranches": [
-        "v1.12",
-        "v1.11"
+        "v1.12"
       ]
     },
     {
       "matchPackageNames": [
         "docker.io/library/busybox"
       ],
-      "allowedVersions": "<=1.35",
+      "allowedVersions": ">=1.35",
       "matchPaths": [
         "install/kubernetes/cilium/templates/spire/**"
       ],
@@ -214,9 +272,17 @@
         "docker.io/library/golang",
         "go"
       ],
-      // Golang 1.20.0 had a regression which prevented us from upgrading it
-      // to 1.20 before the 1.13 release.
-      "allowedVersions": "<1.20",
+      "allowedVersions": "<1.21",
+      "matchBaseBranches": [
+        "v1.14"
+      ]
+    },
+    {
+      "matchPackageNames": [
+        "docker.io/library/golang",
+        "go"
+      ],
+      "allowedVersions": "<1.21",
       "matchBaseBranches": [
         "v1.13"
       ]
@@ -226,19 +292,18 @@
         "docker.io/library/golang",
         "go"
       ],
-      "allowedVersions": "<1.19",
+      "allowedVersions": "<1.21",
       "matchBaseBranches": [
         "v1.12"
       ]
     },
     {
       "matchPackageNames": [
-        "docker.io/library/golang",
-        "go"
+        "docker.io/library/alpine"
       ],
-      "allowedVersions": "<1.18",
+      "allowedVersions": "<3.19",
       "matchBaseBranches": [
-        "v1.11"
+        "v1.14",
       ]
     },
     {
@@ -256,8 +321,7 @@
       ],
       "allowedVersions": "<3.17",
       "matchBaseBranches": [
-        "v1.12",
-        "v1.11"
+        "v1.12"
       ]
     },
     {
@@ -266,11 +330,29 @@
       ],
       "versioning": "regex:^v0.0.0-(<patch>\\d+)-.*$",
     },
+    // Ref: https://github.com/cilium/cilium-cli#releases
     {
       "groupName": "Cilium CLI",
       "groupSlug": "cilium-cli",
       "matchDepNames": [
         "cilium/cilium-cli"
+      ],
+      "matchBaseBranches": [
+        "main",
+        "v1.14",
+      ]
+    },
+    {
+      "groupName": "Cilium CLI",
+      "groupSlug": "cilium-cli",
+      "matchDepNames": [
+        "cilium/cilium-cli"
+      ],
+      "allowedVersions": "/^v0\\.14\\.[0-9]+$/",
+      "matchBaseBranches": [
+        "v1.13",
+        "v1.12",
+        "v1.11",
       ]
     },
     {
@@ -288,7 +370,7 @@
         "docker.io/library/golang"
       ],
       "schedule": [
-        "on friday"
+        "on monday"
       ]
     },
     {
@@ -306,10 +388,68 @@
         "golangci/golangci-lint"
       ],
       "matchBaseBranches": [
+        "v1.14",
         "v1.13",
-        "v1.12",
-        "v1.11"
+        "v1.12"
       ]
+    },
+    {
+      "matchDepNames": [
+        "quay.io/lvh-images/kind"
+      ],
+      "versioning": "regex:^((?<compatibility>[a-z-]+)|((?<major>\\d+)\\.(?<minor>\\d+)))\\-(?<patch>\\d+)\\.(?<build>\\d+)(@(?<currentDigest>sha256:[a-f0-9]+))?$"
+    },
+    {
+      "groupName": "all lvh-images main",
+      "groupSlug": "all-lvh-images-main",
+      "matchPackageNames": [
+        "quay.io/lvh-images/kind"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "patch",
+        "pin",
+        "pinDigest"
+      ],
+      "schedule": [
+        "on monday"
+      ],
+    },
+    {
+      "groupName": "all kind-images main",
+      "groupSlug": "all-kind-images-main",
+      "matchPackageNames": [
+        "kindest/node",
+        "quay.io/cilium/kindest-node"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "patch",
+        "pin",
+        "pinDigest"
+      ],
+      "schedule": [
+        "on monday"
+      ],
+    },
+    {
+      // Do not allow any updates for major.minor, they will be done by maintainers
+      "enabled": false,
+      "matchPackageNames": [
+        "quay.io/lvh-images/kind",
+        "kindest/node",
+        "quay.io/cilium/kindest-node"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+    },
+    {
+      "matchPackageNames": [
+        "quay.io/cilium/kindest-node"
+      ],
+      "ignoreUnstable": false,
     }
   ],
   "kubernetes": {
@@ -337,14 +477,19 @@
     },
     {
       "fileMatch": [
-        "^\\.github/workflows/[^/]+\\.ya?ml$"
+        "^\\.github/workflows/[^/]+\\.ya?ml$",
+        "^\\.github/actions/ginkgo/[^/]+\\.ya?ml$"
       ],
       // This regex manages version strings in GitHub actions workflow files,
       // similar to the examples shown here:
       //   https://docs.renovatebot.com/modules/manager/regex/#advanced-capture
       "matchStrings": [
         "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)\\s+.+version: (?<currentValue>.*)",
-        "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)\\s+.+_VERSION: (?<currentValue>.*)"
+        "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)\\s+.+_VERSION: (?<currentValue>.*)",
+        "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)\\s+.+kernel: '(?<currentValue>.*)'",
+        '# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*)\\s+.+kernel: "(?<currentValue>.*)@(?<currentDigest>sha256:[a-f0-9]+)"',
+        '# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*)\\s+.+image-version: "(?<currentValue>.*)@(?<currentDigest>sha256:[a-f0-9]+)"',
+        '# renovate: datasource=(?<datasource>.*?)\\s+.+kube-image: "(?<depName>.*):(?<currentValue>.*)@(?<currentDigest>sha256:[a-f0-9]+)"'
       ]
     },
     {
@@ -373,6 +518,14 @@
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)\\s+.+_VERSION=\"(?<currentValue>.*)\""
+      ]
+    },
+    {
+      "fileMatch": [
+        "^go\\.mod$",
+      ],
+      "matchStrings": [
+        "// renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)\\s+go (?<currentValue>.*)"
       ]
     }
   ]

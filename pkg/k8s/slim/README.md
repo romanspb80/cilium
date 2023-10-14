@@ -3,10 +3,10 @@
 This package is intended to be a slim copy of the structures used in k8s watchers.
 
 The most common structures are under `vendor/k8s.io/api/core/v1/types.go`, or
-`vendor/k8s.io/apimachinery/pkg/apis/meta/v1/types.go`. 
+`vendor/k8s.io/apimachinery/pkg/apis/meta/v1/types.go`.
 
 ```bash
-tag=v1.25.0
+tag=v1.28.0-rc.0
 url="https://raw.githubusercontent.com/kubernetes/kubernetes/${tag}"
 
 curl "${url}/staging/src/k8s.io/api/core/v1/doc.go" > pkg/k8s/slim/k8s/api/core/v1/doc.go
@@ -54,6 +54,8 @@ curl "${url}/staging/src/k8s.io/api/networking/v1/well_known_annotations.go" > p
 curl "${url}/staging/src/k8s.io/apimachinery/pkg/selection/operator.go" > pkg/k8s/slim/k8s/apis/selection/operator.go
 
 curl "${url}/staging/src/k8s.io/apimachinery/pkg/util/intstr/intstr.go" > pkg/k8s/slim/k8s/apis/util/intstr/intstr.go
+
+curl "${url}/staging/src/k8s.io/apimachinery/pkg/api/meta/conditions.go" > pkg/k8s/slim/k8s/apis/api/meta/conditions.go
 ```
 
 All fields of the copied structures are exactly the same as the ones available

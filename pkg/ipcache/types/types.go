@@ -40,13 +40,12 @@ type ResourceID string
 type ResourceKind string
 
 var (
-	ResourceKindCNP                  = ResourceKind("cnp")
-	ResourceKindCCNP                 = ResourceKind("ccnp")
-	ResourceKindEndpoint             = ResourceKind("ep")
-	ResourceKindEndpointSlice        = ResourceKind("endpointslices")
-	ResourceKindEndpointSlicev1beta1 = ResourceKind("endpointslices_v1beta1")
-	ResourceKindNetpol               = ResourceKind("netpol")
-	ResourceKindNode                 = ResourceKind("node")
+	ResourceKindCNP      = ResourceKind("cnp")
+	ResourceKindCCNP     = ResourceKind("ccnp")
+	ResourceKindDaemon   = ResourceKind("daemon")
+	ResourceKindEndpoint = ResourceKind("ep")
+	ResourceKindNetpol   = ResourceKind("netpol")
+	ResourceKindNode     = ResourceKind("node")
 )
 
 // NewResourceID returns a ResourceID populated with the standard fields for
@@ -60,12 +59,6 @@ func NewResourceID(kind ResourceKind, namespace, name string) ResourceID {
 	str.WriteRune('/')
 	str.WriteString(name)
 	return ResourceID(str.String())
-}
-
-// NodeIDHandler is responsible for the management of node identities.
-type NodeIDHandler interface {
-	AllocateNodeID(net.IP) uint16
-	GetNodeIP(uint16) string
 }
 
 // TunnelPeer is the IP address of the host associated with this prefix. This is

@@ -51,6 +51,69 @@ func init() {
                 "$ref": "#/definitions/BgpPeer"
               }
             }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "501": {
+            "description": "BGP Control Plane disabled",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            },
+            "x-go-name": "Disabled"
+          }
+        }
+      }
+    },
+    "/bgp/routes": {
+      "get": {
+        "description": "Retrieves routes from BGP Control Plane RIB filtered by parameters you specify",
+        "tags": [
+          "bgp"
+        ],
+        "summary": "Lists BGP routes from BGP Control Plane RIB.",
+        "parameters": [
+          {
+            "$ref": "#/parameters/bgp-table-type"
+          },
+          {
+            "$ref": "#/parameters/bgp-afi"
+          },
+          {
+            "$ref": "#/parameters/bgp-safi"
+          },
+          {
+            "$ref": "#/parameters/bgp-router-asn"
+          },
+          {
+            "$ref": "#/parameters/bgp-neighbor-address"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/BgpRoute"
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "501": {
+            "description": "BGP Control Plane disabled",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            },
+            "x-go-name": "Disabled"
           }
         }
       }
@@ -162,7 +225,7 @@ func init() {
         "tags": [
           "daemon"
         ],
-        "summary": "Retrieve information about the agent and evironment for debugging",
+        "summary": "Retrieve information about the agent and environment for debugging",
         "responses": {
           "200": {
             "description": "Success",
@@ -204,6 +267,40 @@ func init() {
           },
           "404": {
             "description": "Endpoints with provided parameters not found"
+          },
+          "429": {
+            "description": "Rate-limiting too many requests in the given time frame"
+          }
+        }
+      },
+      "delete": {
+        "description": "Deletes a list of endpoints that have endpoints matching the provided properties\n",
+        "tags": [
+          "endpoint"
+        ],
+        "summary": "Deletes a list of endpoints",
+        "parameters": [
+          {
+            "$ref": "#/parameters/endpoint-batch-delete-request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "206": {
+            "description": "Deleted with a number of errors encountered",
+            "schema": {
+              "type": "integer"
+            },
+            "x-go-name": "Errors"
+          },
+          "400": {
+            "description": "Invalid endpoint delete request",
+            "x-go-name": "Invalid"
+          },
+          "404": {
+            "description": "No endpoints with provided parameters found"
           },
           "429": {
             "description": "Rate-limiting too many requests in the given time frame"
@@ -709,6 +806,31 @@ func init() {
         }
       }
     },
+    "/health": {
+      "get": {
+        "description": "Returns modules health and status information of the Cilium daemon.\n",
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Get modules health of Cilium daemon",
+        "parameters": [
+          {
+            "type": "boolean",
+            "description": "Brief is a brief representation of the Cilium status.\n",
+            "name": "brief",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "$ref": "#/definitions/ModulesHealth"
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "description": "Returns health and status information of the Cilium daemon and related\ncomponents such as the local container runtime, connected datastore,\nKubernetes integration and Hubble.\n",
@@ -1164,6 +1286,12 @@ func init() {
         "parameters": [
           {
             "$ref": "#/parameters/policy-rules"
+          },
+          {
+            "$ref": "#/parameters/policy-replace"
+          },
+          {
+            "$ref": "#/parameters/policy-replace-with-labels"
           }
         ],
         "responses": {
@@ -1601,6 +1729,26 @@ func init() {
           }
         }
       }
+    },
+    "/statedb/dump": {
+      "get": {
+        "produces": [
+          "application/octet-stream"
+        ],
+        "tags": [
+          "statedb"
+        ],
+        "summary": "Dump StateDB contents",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            }
+          }
+        }
+      }
     }
   },
   "definitions": {
@@ -1798,6 +1946,82 @@ func init() {
         }
       }
     },
+    "BgpFamily": {
+      "description": "Address Family Indicator (AFI) and Subsequent Address Family Indicator (SAFI) of the path",
+      "properties": {
+        "afi": {
+          "description": "Address Family Indicator (AFI) of the path",
+          "type": "string"
+        },
+        "safi": {
+          "description": "Subsequent Address Family Indicator (SAFI) of the path",
+          "type": "string"
+        }
+      }
+    },
+    "BgpGracefulRestart": {
+      "description": "BGP graceful restart parameters negotiated with the peer.\n\n+k8s:deepcopy-gen=true",
+      "properties": {
+        "enabled": {
+          "description": "When set, graceful restart capability is negotiated for all AFI/SAFIs of \nthis peer.",
+          "type": "boolean"
+        },
+        "restart-time-seconds": {
+          "description": "This is the time advertised to peer for the BGP session to be re-established \nafter a restart. After this period, peer will remove stale routes. \n(RFC 4724 section 4.2)",
+          "type": "integer"
+        }
+      }
+    },
+    "BgpNlri": {
+      "description": "Network Layer Reachability Information (NLRI) of the path",
+      "properties": {
+        "base64": {
+          "description": "Base64-encoded NLRI in the BGP UPDATE message format",
+          "type": "string"
+        }
+      }
+    },
+    "BgpPath": {
+      "description": "Single BGP routing Path containing BGP Network Layer Reachability Information (NLRI) and path attributes",
+      "properties": {
+        "age-nanoseconds": {
+          "description": "Age of the path (time since its creation) in nanoseconds",
+          "type": "integer"
+        },
+        "best": {
+          "description": "True value flags the best path towards the destination prefix",
+          "type": "boolean"
+        },
+        "family": {
+          "description": "Address Family Indicator (AFI) and Subsequent Address Family Indicator (SAFI) of the path",
+          "$ref": "#/definitions/BgpFamily"
+        },
+        "nlri": {
+          "description": "Network Layer Reachability Information of the path",
+          "$ref": "#/definitions/BgpNlri"
+        },
+        "path-attributes": {
+          "description": "List of BGP path attributes specific for the path",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BgpPathAttribute"
+          }
+        },
+        "stale": {
+          "description": "True value marks the path as stale",
+          "type": "boolean"
+        }
+      }
+    },
+    "BgpPathAttribute": {
+      "description": "Single BGP path attribute specific for the path",
+      "properties": {
+        "base64": {
+          "description": "Base64-encoded BGP path attribute in the BGP UPDATE message format",
+          "type": "string"
+        }
+      }
+    },
     "BgpPeer": {
       "description": "State of a BGP Peer\n\n+k8s:deepcopy-gen=true",
       "properties": {
@@ -1821,12 +2045,20 @@ func init() {
           "description": "Initial value for the BGP ConnectRetryTimer (RFC 4271, Section 8) in seconds",
           "type": "integer"
         },
+        "ebgp-multihop-ttl": {
+          "description": "Time To Live (TTL) value used in BGP packets sent to the eBGP neighbor.\n1 implies that eBGP multi-hop feature is disabled (only a single hop is allowed).\n",
+          "type": "integer"
+        },
         "families": {
           "description": "BGP peer address family state",
           "type": "array",
           "items": {
             "$ref": "#/definitions/BgpPeerFamilies"
           }
+        },
+        "graceful-restart": {
+          "description": "Graceful restart capability",
+          "$ref": "#/definitions/BgpGracefulRestart"
         },
         "local-asn": {
           "description": "Local AS Number",
@@ -1840,9 +2072,19 @@ func init() {
           "description": "Peer AS Number",
           "type": "integer"
         },
+        "peer-port": {
+          "description": "TCP port number of peer",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 1
+        },
         "session-state": {
           "description": "BGP peer operational state as described here\nhttps://www.rfc-editor.org/rfc/rfc4271#section-8.2.2\n",
           "type": "string"
+        },
+        "tcp-password-enabled": {
+          "description": "Set when a TCP password is configured for communications with this peer",
+          "type": "boolean"
         },
         "uptime-nanoseconds": {
           "description": "BGP peer connection uptime in nano seconds.",
@@ -1872,6 +2114,26 @@ func init() {
         "safi": {
           "description": "BGP subsequent address family indicator",
           "type": "string"
+        }
+      }
+    },
+    "BgpRoute": {
+      "description": "Single BGP route retrieved from the RIB of underlying router",
+      "properties": {
+        "paths": {
+          "description": "List of routing paths leading towards the prefix",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BgpPath"
+          }
+        },
+        "prefix": {
+          "description": "IP prefix of the route",
+          "type": "string"
+        },
+        "router-asn": {
+          "description": "Autonomous System Number (ASN) identifying a BGP virtual router instance",
+          "type": "integer"
         }
       }
     },
@@ -2227,12 +2489,20 @@ func init() {
       "description": "Response to a daemon configuration request. Contains the addressing\ninformation, k8s, node monitor and immutable and mutable configuration\nsettings.\n",
       "type": "object",
       "properties": {
+        "GROIPv4MaxSize": {
+          "description": "Maximum IPv4 GRO size on workload facing devices",
+          "type": "integer"
+        },
         "GROMaxSize": {
-          "description": "Maximum GRO size on workload facing devices",
+          "description": "Maximum IPv6 GRO size on workload facing devices",
+          "type": "integer"
+        },
+        "GSOIPv4MaxSize": {
+          "description": "Maximum IPv4 GSO size on workload facing devices",
           "type": "integer"
         },
         "GSOMaxSize": {
-          "description": "Maximum GSO size on workload facing devices",
+          "description": "Maximum IPv6 GSO size on workload facing devices",
           "type": "integer"
         },
         "addressing": {
@@ -2330,7 +2600,7 @@ func init() {
           "type": "object",
           "properties": {
             "wireguard": {
-              "description": "Status of the Wireguard agent",
+              "description": "Status of the WireGuard agent",
               "$ref": "#/definitions/WireguardStatus"
             }
           }
@@ -2383,7 +2653,7 @@ func init() {
           "type": "string"
         },
         "wireguard": {
-          "description": "Status of the Wireguard agent",
+          "description": "Status of the WireGuard agent",
           "$ref": "#/definitions/WireguardStatus"
         }
       }
@@ -2406,6 +2676,16 @@ func init() {
         }
       }
     },
+    "EndpointBatchDeleteRequest": {
+      "description": "Properties selecting a batch of endpoints to delete.\n",
+      "type": "object",
+      "properties": {
+        "container-id": {
+          "description": "ID assigned by container runtime",
+          "type": "string"
+        }
+      }
+    },
     "EndpointChangeRequest": {
       "description": "Structure which contains the mutable elements of an Endpoint.\n",
       "type": "object",
@@ -2420,6 +2700,10 @@ func init() {
           "description": "ID assigned by container runtime",
           "type": "string"
         },
+        "container-interface-name": {
+          "description": "Name of network device in container netns",
+          "type": "string"
+        },
         "container-name": {
           "description": "Name assigned to container",
           "type": "string"
@@ -2430,6 +2714,10 @@ func init() {
         "datapath-map-id": {
           "description": "ID of datapath tail call map",
           "type": "integer"
+        },
+        "disable-legacy-identifiers": {
+          "description": "Disables lookup using legacy endpoint identifiers (container name, container id, pod name) for this endpoint",
+          "type": "boolean"
         },
         "docker-endpoint-id": {
           "description": "Docker endpoint ID",
@@ -2448,11 +2736,11 @@ func init() {
           "type": "integer"
         },
         "interface-index": {
-          "description": "Index of network device",
+          "description": "Index of network device in host netns",
           "type": "integer"
         },
         "interface-name": {
-          "description": "Name of network device",
+          "description": "Name of network device in host netns",
           "type": "string"
         },
         "k8s-namespace": {
@@ -2587,12 +2875,16 @@ func init() {
       "description": "Unique identifiers for this endpoint from outside cilium\n\n+deepequal-gen=true",
       "type": "object",
       "properties": {
+        "cni-attachment-id": {
+          "description": "ID assigned to this attachment by container runtime",
+          "type": "string"
+        },
         "container-id": {
-          "description": "ID assigned by container runtime",
+          "description": "ID assigned by container runtime (deprecated, may not be unique)",
           "type": "string"
         },
         "container-name": {
-          "description": "Name assigned to container",
+          "description": "Name assigned to container (deprecated, may not be unique)",
           "type": "string"
         },
         "docker-endpoint-id": {
@@ -2604,15 +2896,15 @@ func init() {
           "type": "string"
         },
         "k8s-namespace": {
-          "description": "K8s namespace for this endpoint",
+          "description": "K8s namespace for this endpoint (deprecated, may not be unique)",
           "type": "string"
         },
         "k8s-pod-name": {
-          "description": "K8s pod name for this endpoint",
+          "description": "K8s pod name for this endpoint (deprecated, may not be unique)",
           "type": "string"
         },
         "pod-name": {
-          "description": "K8s pod for this endpoint(Deprecated, use K8sPodName and K8sNamespace instead)",
+          "description": "K8s pod for this endpoint (deprecated, may not be unique)",
           "type": "string"
         }
       }
@@ -2628,6 +2920,10 @@ func init() {
             "$ref": "#/definitions/AddressPair"
           }
         },
+        "container-interface-name": {
+          "description": "Name of network device in container netns",
+          "type": "string"
+        },
         "host-addressing": {
           "$ref": "#/definitions/NodeAddressing"
         },
@@ -2636,11 +2932,11 @@ func init() {
           "type": "string"
         },
         "interface-index": {
-          "description": "Index of network device",
+          "description": "Index of network device in host netns",
           "type": "integer"
         },
         "interface-name": {
-          "description": "Name of network device",
+          "description": "Name of network device in host netns",
           "type": "string"
         },
         "mac": {
@@ -3112,6 +3408,24 @@ func init() {
         }
       }
     },
+    "IPV4BigTCP": {
+      "description": "Status of IPv4 BIG TCP\n\n+k8s:deepcopy-gen=true",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Is IPv4 BIG TCP enabled",
+          "type": "boolean"
+        },
+        "maxGRO": {
+          "description": "Maximum IPv4 GRO size",
+          "type": "integer"
+        },
+        "maxGSO": {
+          "description": "Maximum IPv4 GSO size",
+          "type": "integer"
+        }
+      }
+    },
     "IPV6BigTCP": {
       "description": "Status of IPv6 BIG TCP\n\n+k8s:deepcopy-gen=true",
       "type": "object",
@@ -3119,6 +3433,14 @@ func init() {
         "enabled": {
           "description": "Is IPv6 BIG TCP enabled",
           "type": "boolean"
+        },
+        "maxGRO": {
+          "description": "Maximum IPv6 GRO size",
+          "type": "integer"
+        },
+        "maxGSO": {
+          "description": "Maximum IPv6 GSO size",
+          "type": "integer"
         }
       }
     },
@@ -3401,7 +3723,9 @@ func init() {
             "Disabled",
             "Strict",
             "Probe",
-            "Partial"
+            "Partial",
+            "True",
+            "False"
           ]
         }
       }
@@ -3655,6 +3979,43 @@ func init() {
         "value": {
           "description": "Value of the metric",
           "type": "number"
+        }
+      }
+    },
+    "ModuleHealth": {
+      "description": "Report module health status",
+      "properties": {
+        "last-ok": {
+          "description": "Time at which the last OK check occurred",
+          "type": "string"
+        },
+        "last-updated": {
+          "description": "Time of last health update",
+          "type": "string"
+        },
+        "level": {
+          "description": "Describes the health status level",
+          "type": "string"
+        },
+        "message": {
+          "description": "Reports the associated health message",
+          "type": "string"
+        },
+        "module-id": {
+          "description": "Describes the module identitier",
+          "type": "string"
+        }
+      }
+    },
+    "ModulesHealth": {
+      "description": "Reports health status of agent's modules",
+      "properties": {
+        "modules": {
+          "description": "List out modules health status",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModuleHealth"
+          }
         }
       }
     },
@@ -4132,6 +4493,14 @@ func init() {
     "RemoteCluster": {
       "description": "Status of remote cluster\n\n+k8s:deepcopy-gen=true",
       "properties": {
+        "config": {
+          "description": "Cluster configuration exposed by the remote cluster",
+          "$ref": "#/definitions/RemoteClusterConfig"
+        },
+        "connected": {
+          "description": "Indicates whether the connection to the remote kvstore is established",
+          "type": "boolean"
+        },
         "last-failure": {
           "description": "Time of last failure that occurred while attempting to reach the cluster",
           "type": "string",
@@ -4140,6 +4509,10 @@ func init() {
         "name": {
           "description": "Name of the cluster",
           "type": "string"
+        },
+        "num-endpoints": {
+          "description": "Number of endpoints in the cluster",
+          "type": "integer"
         },
         "num-failures": {
           "description": "Number of failures reaching the cluster",
@@ -4158,12 +4531,62 @@ func init() {
           "type": "integer"
         },
         "ready": {
-          "description": "Indicates readiness of the remote cluser",
+          "description": "Indicates readiness of the remote cluster",
           "type": "boolean"
         },
         "status": {
           "description": "Status of the control plane",
           "type": "string"
+        },
+        "synced": {
+          "description": "Synchronization status about each resource type",
+          "$ref": "#/definitions/RemoteClusterSynced"
+        }
+      }
+    },
+    "RemoteClusterConfig": {
+      "description": "Cluster configuration exposed by the remote cluster\n\n+k8s:deepcopy-gen=true",
+      "properties": {
+        "cluster-id": {
+          "description": "The Cluster ID advertised by the remote cluster",
+          "type": "integer"
+        },
+        "kvstoremesh": {
+          "description": "Whether the remote cluster information is locally cached by kvstoremesh",
+          "type": "boolean"
+        },
+        "required": {
+          "description": "Whether the configuration is required to be present",
+          "type": "boolean"
+        },
+        "retrieved": {
+          "description": "Whether the configuration has been correctly retrieved",
+          "type": "boolean"
+        },
+        "sync-canaries": {
+          "description": "Whether the remote cluster supports per-prefix \"synced\" canaries",
+          "type": "boolean"
+        }
+      }
+    },
+    "RemoteClusterSynced": {
+      "description": "Status of the synchronization with the remote cluster, about each resource\ntype. A given resource is considered to be synchronized if the initial\nlist of entries has been completely received from the remote cluster, and\nnew events are currently being watched.\n\n+k8s:deepcopy-gen=true",
+      "properties": {
+        "endpoints": {
+          "description": "Endpoints synchronization status",
+          "type": "boolean"
+        },
+        "identities": {
+          "description": "Identities synchronization status",
+          "type": "boolean"
+        },
+        "nodes": {
+          "description": "Nodes synchronization status",
+          "type": "boolean"
+        },
+        "services": {
+          "description": "Services synchronization status",
+          "type": "boolean"
         }
       }
     },
@@ -4210,6 +4633,10 @@ func init() {
           "items": {
             "type": "integer"
           }
+        },
+        "labels": {
+          "description": "Labels are the metadata labels associated with the selector",
+          "type": "object"
         },
         "selector": {
           "description": "string form of selector",
@@ -4362,6 +4789,10 @@ func init() {
       "description": "Health and status information of daemon\n\n+k8s:deepcopy-gen=true",
       "type": "object",
       "properties": {
+        "auth-certificate-provider": {
+          "description": "Status of Mutual Authentication certificate provider",
+          "$ref": "#/definitions/Status"
+        },
         "bandwidth-manager": {
           "description": "Status of bandwidth manager",
           "$ref": "#/definitions/BandwidthManager"
@@ -4429,6 +4860,10 @@ func init() {
         "ipam": {
           "description": "Status of IP address management",
           "$ref": "#/definitions/IPAMStatus"
+        },
+        "ipv4-big-tcp": {
+          "description": "Status of IPv4 BIG TCP",
+          "$ref": "#/definitions/IPV4BigTCP"
         },
         "ipv6-big-tcp": {
           "description": "Status of IPv6 BIG TCP",
@@ -4509,10 +4944,10 @@ func init() {
       }
     },
     "WireguardInterface": {
-      "description": "Status of a Wireguard interface\n\n+k8s:deepcopy-gen=true",
+      "description": "Status of a WireGuard interface\n\n+k8s:deepcopy-gen=true",
       "properties": {
         "listen-port": {
-          "description": "Port on which the Wireguard endpoint is exposed",
+          "description": "Port on which the WireGuard endpoint is exposed",
           "type": "integer"
         },
         "name": {
@@ -4524,7 +4959,7 @@ func init() {
           "type": "integer"
         },
         "peers": {
-          "description": "Optional list of wireguard peers",
+          "description": "Optional list of WireGuard peers",
           "type": "array",
           "items": {
             "$ref": "#/definitions/WireguardPeer"
@@ -4537,7 +4972,7 @@ func init() {
       }
     },
     "WireguardPeer": {
-      "description": "Status of a Wireguard peer\n\n+k8s:deepcopy-gen=true",
+      "description": "Status of a WireGuard peer\n\n+k8s:deepcopy-gen=true",
       "properties": {
         "allowed-ips": {
           "description": "List of IPs which may be routed through this peer",
@@ -4570,10 +5005,10 @@ func init() {
       }
     },
     "WireguardStatus": {
-      "description": "Status of the Wireguard agent\n\n+k8s:deepcopy-gen=true",
+      "description": "Status of the WireGuard agent\n\n+k8s:deepcopy-gen=true",
       "properties": {
         "interfaces": {
-          "description": "Wireguard interfaces managed by this Cilium instance",
+          "description": "WireGuard interfaces managed by this Cilium instance",
           "type": "array",
           "items": {
             "$ref": "#/definitions/WireguardInterface"
@@ -4587,11 +5022,57 @@ func init() {
     }
   },
   "parameters": {
+    "bgp-afi": {
+      "type": "string",
+      "description": "Address Family Indicator (AFI) of a BGP route",
+      "name": "afi",
+      "in": "query",
+      "required": true
+    },
+    "bgp-neighbor-address": {
+      "type": "string",
+      "description": "IP address specifying a BGP neighbor.\nHas to be specified only when table type is adj-rib-in or adj-rib-out.\n",
+      "name": "neighbor",
+      "in": "query"
+    },
+    "bgp-router-asn": {
+      "type": "integer",
+      "description": "Autonomous System Number (ASN) identifying a BGP virtual router instance.\nIf not specified, all virtual router instances are selected.\n",
+      "name": "router_asn",
+      "in": "query"
+    },
+    "bgp-safi": {
+      "type": "string",
+      "description": "Subsequent Address Family Indicator (SAFI) of a BGP route",
+      "name": "safi",
+      "in": "query",
+      "required": true
+    },
+    "bgp-table-type": {
+      "enum": [
+        "loc-rib",
+        "adj-rib-in",
+        "adj-rib-out"
+      ],
+      "type": "string",
+      "description": "BGP Routing Information Base (RIB) table type",
+      "name": "table_type",
+      "in": "query",
+      "required": true
+    },
     "cidr": {
       "type": "string",
       "description": "A CIDR range of IPs",
       "name": "cidr",
       "in": "query"
+    },
+    "endpoint-batch-delete-request": {
+      "name": "endpoint",
+      "in": "body",
+      "required": true,
+      "schema": {
+        "$ref": "#/definitions/EndpointBatchDeleteRequest"
+      }
     },
     "endpoint-change-request": {
       "name": "endpoint",
@@ -4603,7 +5084,7 @@ func init() {
     },
     "endpoint-id": {
       "type": "string",
-      "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+      "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
       "name": "id",
       "in": "path",
       "required": true
@@ -4679,6 +5160,21 @@ func init() {
       "name": "pod",
       "in": "path",
       "required": true
+    },
+    "policy-replace": {
+      "type": "boolean",
+      "description": "If true, indicates that existing rules with identical labels should be replaced.",
+      "name": "replace",
+      "in": "query"
+    },
+    "policy-replace-with-labels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "If present, indicates that existing rules with the given labels should be deleted.",
+      "name": "replace-with-labels",
+      "in": "query"
     },
     "policy-rules": {
       "description": "Policy rules",
@@ -4788,6 +5284,92 @@ func init() {
                 "$ref": "#/definitions/BgpPeer"
               }
             }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "501": {
+            "description": "BGP Control Plane disabled",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            },
+            "x-go-name": "Disabled"
+          }
+        }
+      }
+    },
+    "/bgp/routes": {
+      "get": {
+        "description": "Retrieves routes from BGP Control Plane RIB filtered by parameters you specify",
+        "tags": [
+          "bgp"
+        ],
+        "summary": "Lists BGP routes from BGP Control Plane RIB.",
+        "parameters": [
+          {
+            "enum": [
+              "loc-rib",
+              "adj-rib-in",
+              "adj-rib-out"
+            ],
+            "type": "string",
+            "description": "BGP Routing Information Base (RIB) table type",
+            "name": "table_type",
+            "in": "query",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "Address Family Indicator (AFI) of a BGP route",
+            "name": "afi",
+            "in": "query",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "Subsequent Address Family Indicator (SAFI) of a BGP route",
+            "name": "safi",
+            "in": "query",
+            "required": true
+          },
+          {
+            "type": "integer",
+            "description": "Autonomous System Number (ASN) identifying a BGP virtual router instance.\nIf not specified, all virtual router instances are selected.\n",
+            "name": "router_asn",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "IP address specifying a BGP neighbor.\nHas to be specified only when table type is adj-rib-in or adj-rib-out.\n",
+            "name": "neighbor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/BgpRoute"
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "501": {
+            "description": "BGP Control Plane disabled",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            },
+            "x-go-name": "Disabled"
           }
         }
       }
@@ -4899,7 +5481,7 @@ func init() {
         "tags": [
           "daemon"
         ],
-        "summary": "Retrieve information about the agent and evironment for debugging",
+        "summary": "Retrieve information about the agent and environment for debugging",
         "responses": {
           "200": {
             "description": "Success",
@@ -4951,6 +5533,45 @@ func init() {
             "description": "Rate-limiting too many requests in the given time frame"
           }
         }
+      },
+      "delete": {
+        "description": "Deletes a list of endpoints that have endpoints matching the provided properties\n",
+        "tags": [
+          "endpoint"
+        ],
+        "summary": "Deletes a list of endpoints",
+        "parameters": [
+          {
+            "name": "endpoint",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/EndpointBatchDeleteRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "206": {
+            "description": "Deleted with a number of errors encountered",
+            "schema": {
+              "type": "integer"
+            },
+            "x-go-name": "Errors"
+          },
+          "400": {
+            "description": "Invalid endpoint delete request",
+            "x-go-name": "Invalid"
+          },
+          "404": {
+            "description": "No endpoints with provided parameters found"
+          },
+          "429": {
+            "description": "Rate-limiting too many requests in the given time frame"
+          }
+        }
       }
     },
     "/endpoint/{id}": {
@@ -4963,7 +5584,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5000,7 +5621,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5053,7 +5674,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5098,7 +5719,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5152,7 +5773,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5182,7 +5803,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5232,7 +5853,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5267,7 +5888,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5297,7 +5918,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5343,7 +5964,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5457,7 +6078,7 @@ func init() {
         "parameters": [
           {
             "type": "string",
-            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+            "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
             "name": "id",
             "in": "path",
             "required": true
@@ -5521,6 +6142,31 @@ func init() {
             "description": "Invalid request (error parsing parameters)",
             "schema": {
               "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Returns modules health and status information of the Cilium daemon.\n",
+        "tags": [
+          "daemon"
+        ],
+        "summary": "Get modules health of Cilium daemon",
+        "parameters": [
+          {
+            "type": "boolean",
+            "description": "Brief is a brief representation of the Cilium status.\n",
+            "name": "brief",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "$ref": "#/definitions/ModulesHealth"
             }
           }
         }
@@ -6036,6 +6682,21 @@ func init() {
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "type": "boolean",
+            "description": "If true, indicates that existing rules with identical labels should be replaced.",
+            "name": "replace",
+            "in": "query"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "If present, indicates that existing rules with the given labels should be deleted.",
+            "name": "replace-with-labels",
+            "in": "query"
           }
         ],
         "responses": {
@@ -6521,6 +7182,26 @@ func init() {
           }
         }
       }
+    },
+    "/statedb/dump": {
+      "get": {
+        "produces": [
+          "application/octet-stream"
+        ],
+        "tags": [
+          "statedb"
+        ],
+        "summary": "Dump StateDB contents",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            }
+          }
+        }
+      }
     }
   },
   "definitions": {
@@ -6718,6 +7399,82 @@ func init() {
         }
       }
     },
+    "BgpFamily": {
+      "description": "Address Family Indicator (AFI) and Subsequent Address Family Indicator (SAFI) of the path",
+      "properties": {
+        "afi": {
+          "description": "Address Family Indicator (AFI) of the path",
+          "type": "string"
+        },
+        "safi": {
+          "description": "Subsequent Address Family Indicator (SAFI) of the path",
+          "type": "string"
+        }
+      }
+    },
+    "BgpGracefulRestart": {
+      "description": "BGP graceful restart parameters negotiated with the peer.\n\n+k8s:deepcopy-gen=true",
+      "properties": {
+        "enabled": {
+          "description": "When set, graceful restart capability is negotiated for all AFI/SAFIs of \nthis peer.",
+          "type": "boolean"
+        },
+        "restart-time-seconds": {
+          "description": "This is the time advertised to peer for the BGP session to be re-established \nafter a restart. After this period, peer will remove stale routes. \n(RFC 4724 section 4.2)",
+          "type": "integer"
+        }
+      }
+    },
+    "BgpNlri": {
+      "description": "Network Layer Reachability Information (NLRI) of the path",
+      "properties": {
+        "base64": {
+          "description": "Base64-encoded NLRI in the BGP UPDATE message format",
+          "type": "string"
+        }
+      }
+    },
+    "BgpPath": {
+      "description": "Single BGP routing Path containing BGP Network Layer Reachability Information (NLRI) and path attributes",
+      "properties": {
+        "age-nanoseconds": {
+          "description": "Age of the path (time since its creation) in nanoseconds",
+          "type": "integer"
+        },
+        "best": {
+          "description": "True value flags the best path towards the destination prefix",
+          "type": "boolean"
+        },
+        "family": {
+          "description": "Address Family Indicator (AFI) and Subsequent Address Family Indicator (SAFI) of the path",
+          "$ref": "#/definitions/BgpFamily"
+        },
+        "nlri": {
+          "description": "Network Layer Reachability Information of the path",
+          "$ref": "#/definitions/BgpNlri"
+        },
+        "path-attributes": {
+          "description": "List of BGP path attributes specific for the path",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BgpPathAttribute"
+          }
+        },
+        "stale": {
+          "description": "True value marks the path as stale",
+          "type": "boolean"
+        }
+      }
+    },
+    "BgpPathAttribute": {
+      "description": "Single BGP path attribute specific for the path",
+      "properties": {
+        "base64": {
+          "description": "Base64-encoded BGP path attribute in the BGP UPDATE message format",
+          "type": "string"
+        }
+      }
+    },
     "BgpPeer": {
       "description": "State of a BGP Peer\n\n+k8s:deepcopy-gen=true",
       "properties": {
@@ -6741,12 +7498,20 @@ func init() {
           "description": "Initial value for the BGP ConnectRetryTimer (RFC 4271, Section 8) in seconds",
           "type": "integer"
         },
+        "ebgp-multihop-ttl": {
+          "description": "Time To Live (TTL) value used in BGP packets sent to the eBGP neighbor.\n1 implies that eBGP multi-hop feature is disabled (only a single hop is allowed).\n",
+          "type": "integer"
+        },
         "families": {
           "description": "BGP peer address family state",
           "type": "array",
           "items": {
             "$ref": "#/definitions/BgpPeerFamilies"
           }
+        },
+        "graceful-restart": {
+          "description": "Graceful restart capability",
+          "$ref": "#/definitions/BgpGracefulRestart"
         },
         "local-asn": {
           "description": "Local AS Number",
@@ -6760,9 +7525,19 @@ func init() {
           "description": "Peer AS Number",
           "type": "integer"
         },
+        "peer-port": {
+          "description": "TCP port number of peer",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 1
+        },
         "session-state": {
           "description": "BGP peer operational state as described here\nhttps://www.rfc-editor.org/rfc/rfc4271#section-8.2.2\n",
           "type": "string"
+        },
+        "tcp-password-enabled": {
+          "description": "Set when a TCP password is configured for communications with this peer",
+          "type": "boolean"
         },
         "uptime-nanoseconds": {
           "description": "BGP peer connection uptime in nano seconds.",
@@ -6792,6 +7567,26 @@ func init() {
         "safi": {
           "description": "BGP subsequent address family indicator",
           "type": "string"
+        }
+      }
+    },
+    "BgpRoute": {
+      "description": "Single BGP route retrieved from the RIB of underlying router",
+      "properties": {
+        "paths": {
+          "description": "List of routing paths leading towards the prefix",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BgpPath"
+          }
+        },
+        "prefix": {
+          "description": "IP prefix of the route",
+          "type": "string"
+        },
+        "router-asn": {
+          "description": "Autonomous System Number (ASN) identifying a BGP virtual router instance",
+          "type": "integer"
         }
       }
     },
@@ -7199,12 +7994,20 @@ func init() {
       "description": "Response to a daemon configuration request. Contains the addressing\ninformation, k8s, node monitor and immutable and mutable configuration\nsettings.\n",
       "type": "object",
       "properties": {
+        "GROIPv4MaxSize": {
+          "description": "Maximum IPv4 GRO size on workload facing devices",
+          "type": "integer"
+        },
         "GROMaxSize": {
-          "description": "Maximum GRO size on workload facing devices",
+          "description": "Maximum IPv6 GRO size on workload facing devices",
+          "type": "integer"
+        },
+        "GSOIPv4MaxSize": {
+          "description": "Maximum IPv4 GSO size on workload facing devices",
           "type": "integer"
         },
         "GSOMaxSize": {
-          "description": "Maximum GSO size on workload facing devices",
+          "description": "Maximum IPv6 GSO size on workload facing devices",
           "type": "integer"
         },
         "addressing": {
@@ -7316,7 +8119,7 @@ func init() {
           "type": "object",
           "properties": {
             "wireguard": {
-              "description": "Status of the Wireguard agent",
+              "description": "Status of the WireGuard agent",
               "$ref": "#/definitions/WireguardStatus"
             }
           }
@@ -7357,7 +8160,7 @@ func init() {
       "type": "object",
       "properties": {
         "wireguard": {
-          "description": "Status of the Wireguard agent",
+          "description": "Status of the WireGuard agent",
           "$ref": "#/definitions/WireguardStatus"
         }
       }
@@ -7378,7 +8181,7 @@ func init() {
           "type": "string"
         },
         "wireguard": {
-          "description": "Status of the Wireguard agent",
+          "description": "Status of the WireGuard agent",
           "$ref": "#/definitions/WireguardStatus"
         }
       }
@@ -7401,6 +8204,16 @@ func init() {
         }
       }
     },
+    "EndpointBatchDeleteRequest": {
+      "description": "Properties selecting a batch of endpoints to delete.\n",
+      "type": "object",
+      "properties": {
+        "container-id": {
+          "description": "ID assigned by container runtime",
+          "type": "string"
+        }
+      }
+    },
     "EndpointChangeRequest": {
       "description": "Structure which contains the mutable elements of an Endpoint.\n",
       "type": "object",
@@ -7415,6 +8228,10 @@ func init() {
           "description": "ID assigned by container runtime",
           "type": "string"
         },
+        "container-interface-name": {
+          "description": "Name of network device in container netns",
+          "type": "string"
+        },
         "container-name": {
           "description": "Name assigned to container",
           "type": "string"
@@ -7425,6 +8242,10 @@ func init() {
         "datapath-map-id": {
           "description": "ID of datapath tail call map",
           "type": "integer"
+        },
+        "disable-legacy-identifiers": {
+          "description": "Disables lookup using legacy endpoint identifiers (container name, container id, pod name) for this endpoint",
+          "type": "boolean"
         },
         "docker-endpoint-id": {
           "description": "Docker endpoint ID",
@@ -7443,11 +8264,11 @@ func init() {
           "type": "integer"
         },
         "interface-index": {
-          "description": "Index of network device",
+          "description": "Index of network device in host netns",
           "type": "integer"
         },
         "interface-name": {
-          "description": "Name of network device",
+          "description": "Name of network device in host netns",
           "type": "string"
         },
         "k8s-namespace": {
@@ -7582,12 +8403,16 @@ func init() {
       "description": "Unique identifiers for this endpoint from outside cilium\n\n+deepequal-gen=true",
       "type": "object",
       "properties": {
+        "cni-attachment-id": {
+          "description": "ID assigned to this attachment by container runtime",
+          "type": "string"
+        },
         "container-id": {
-          "description": "ID assigned by container runtime",
+          "description": "ID assigned by container runtime (deprecated, may not be unique)",
           "type": "string"
         },
         "container-name": {
-          "description": "Name assigned to container",
+          "description": "Name assigned to container (deprecated, may not be unique)",
           "type": "string"
         },
         "docker-endpoint-id": {
@@ -7599,15 +8424,15 @@ func init() {
           "type": "string"
         },
         "k8s-namespace": {
-          "description": "K8s namespace for this endpoint",
+          "description": "K8s namespace for this endpoint (deprecated, may not be unique)",
           "type": "string"
         },
         "k8s-pod-name": {
-          "description": "K8s pod name for this endpoint",
+          "description": "K8s pod name for this endpoint (deprecated, may not be unique)",
           "type": "string"
         },
         "pod-name": {
-          "description": "K8s pod for this endpoint(Deprecated, use K8sPodName and K8sNamespace instead)",
+          "description": "K8s pod for this endpoint (deprecated, may not be unique)",
           "type": "string"
         }
       }
@@ -7623,6 +8448,10 @@ func init() {
             "$ref": "#/definitions/AddressPair"
           }
         },
+        "container-interface-name": {
+          "description": "Name of network device in container netns",
+          "type": "string"
+        },
         "host-addressing": {
           "$ref": "#/definitions/NodeAddressing"
         },
@@ -7631,11 +8460,11 @@ func init() {
           "type": "string"
         },
         "interface-index": {
-          "description": "Index of network device",
+          "description": "Index of network device in host netns",
           "type": "integer"
         },
         "interface-name": {
-          "description": "Name of network device",
+          "description": "Name of network device in host netns",
           "type": "string"
         },
         "mac": {
@@ -8146,6 +8975,24 @@ func init() {
         }
       }
     },
+    "IPV4BigTCP": {
+      "description": "Status of IPv4 BIG TCP\n\n+k8s:deepcopy-gen=true",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Is IPv4 BIG TCP enabled",
+          "type": "boolean"
+        },
+        "maxGRO": {
+          "description": "Maximum IPv4 GRO size",
+          "type": "integer"
+        },
+        "maxGSO": {
+          "description": "Maximum IPv4 GSO size",
+          "type": "integer"
+        }
+      }
+    },
     "IPV6BigTCP": {
       "description": "Status of IPv6 BIG TCP\n\n+k8s:deepcopy-gen=true",
       "type": "object",
@@ -8153,6 +9000,14 @@ func init() {
         "enabled": {
           "description": "Is IPv6 BIG TCP enabled",
           "type": "boolean"
+        },
+        "maxGRO": {
+          "description": "Maximum IPv6 GRO size",
+          "type": "integer"
+        },
+        "maxGSO": {
+          "description": "Maximum IPv6 GSO size",
+          "type": "integer"
         }
       }
     },
@@ -8422,7 +9277,9 @@ func init() {
             "Disabled",
             "Strict",
             "Probe",
-            "Partial"
+            "Partial",
+            "True",
+            "False"
           ]
         }
       }
@@ -9029,6 +9886,43 @@ func init() {
         }
       }
     },
+    "ModuleHealth": {
+      "description": "Report module health status",
+      "properties": {
+        "last-ok": {
+          "description": "Time at which the last OK check occurred",
+          "type": "string"
+        },
+        "last-updated": {
+          "description": "Time of last health update",
+          "type": "string"
+        },
+        "level": {
+          "description": "Describes the health status level",
+          "type": "string"
+        },
+        "message": {
+          "description": "Reports the associated health message",
+          "type": "string"
+        },
+        "module-id": {
+          "description": "Describes the module identitier",
+          "type": "string"
+        }
+      }
+    },
+    "ModulesHealth": {
+      "description": "Reports health status of agent's modules",
+      "properties": {
+        "modules": {
+          "description": "List out modules health status",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModuleHealth"
+          }
+        }
+      }
+    },
     "MonitorStatus": {
       "description": "Status of the node monitor",
       "properties": {
@@ -9503,6 +10397,14 @@ func init() {
     "RemoteCluster": {
       "description": "Status of remote cluster\n\n+k8s:deepcopy-gen=true",
       "properties": {
+        "config": {
+          "description": "Cluster configuration exposed by the remote cluster",
+          "$ref": "#/definitions/RemoteClusterConfig"
+        },
+        "connected": {
+          "description": "Indicates whether the connection to the remote kvstore is established",
+          "type": "boolean"
+        },
         "last-failure": {
           "description": "Time of last failure that occurred while attempting to reach the cluster",
           "type": "string",
@@ -9511,6 +10413,10 @@ func init() {
         "name": {
           "description": "Name of the cluster",
           "type": "string"
+        },
+        "num-endpoints": {
+          "description": "Number of endpoints in the cluster",
+          "type": "integer"
         },
         "num-failures": {
           "description": "Number of failures reaching the cluster",
@@ -9529,12 +10435,62 @@ func init() {
           "type": "integer"
         },
         "ready": {
-          "description": "Indicates readiness of the remote cluser",
+          "description": "Indicates readiness of the remote cluster",
           "type": "boolean"
         },
         "status": {
           "description": "Status of the control plane",
           "type": "string"
+        },
+        "synced": {
+          "description": "Synchronization status about each resource type",
+          "$ref": "#/definitions/RemoteClusterSynced"
+        }
+      }
+    },
+    "RemoteClusterConfig": {
+      "description": "Cluster configuration exposed by the remote cluster\n\n+k8s:deepcopy-gen=true",
+      "properties": {
+        "cluster-id": {
+          "description": "The Cluster ID advertised by the remote cluster",
+          "type": "integer"
+        },
+        "kvstoremesh": {
+          "description": "Whether the remote cluster information is locally cached by kvstoremesh",
+          "type": "boolean"
+        },
+        "required": {
+          "description": "Whether the configuration is required to be present",
+          "type": "boolean"
+        },
+        "retrieved": {
+          "description": "Whether the configuration has been correctly retrieved",
+          "type": "boolean"
+        },
+        "sync-canaries": {
+          "description": "Whether the remote cluster supports per-prefix \"synced\" canaries",
+          "type": "boolean"
+        }
+      }
+    },
+    "RemoteClusterSynced": {
+      "description": "Status of the synchronization with the remote cluster, about each resource\ntype. A given resource is considered to be synchronized if the initial\nlist of entries has been completely received from the remote cluster, and\nnew events are currently being watched.\n\n+k8s:deepcopy-gen=true",
+      "properties": {
+        "endpoints": {
+          "description": "Endpoints synchronization status",
+          "type": "boolean"
+        },
+        "identities": {
+          "description": "Identities synchronization status",
+          "type": "boolean"
+        },
+        "nodes": {
+          "description": "Nodes synchronization status",
+          "type": "boolean"
+        },
+        "services": {
+          "description": "Services synchronization status",
+          "type": "boolean"
         }
       }
     },
@@ -9581,6 +10537,10 @@ func init() {
           "items": {
             "type": "integer"
           }
+        },
+        "labels": {
+          "description": "Labels are the metadata labels associated with the selector",
+          "type": "object"
         },
         "selector": {
           "description": "string form of selector",
@@ -9801,6 +10761,10 @@ func init() {
       "description": "Health and status information of daemon\n\n+k8s:deepcopy-gen=true",
       "type": "object",
       "properties": {
+        "auth-certificate-provider": {
+          "description": "Status of Mutual Authentication certificate provider",
+          "$ref": "#/definitions/Status"
+        },
         "bandwidth-manager": {
           "description": "Status of bandwidth manager",
           "$ref": "#/definitions/BandwidthManager"
@@ -9868,6 +10832,10 @@ func init() {
         "ipam": {
           "description": "Status of IP address management",
           "$ref": "#/definitions/IPAMStatus"
+        },
+        "ipv4-big-tcp": {
+          "description": "Status of IPv4 BIG TCP",
+          "$ref": "#/definitions/IPV4BigTCP"
         },
         "ipv6-big-tcp": {
           "description": "Status of IPv6 BIG TCP",
@@ -9948,10 +10916,10 @@ func init() {
       }
     },
     "WireguardInterface": {
-      "description": "Status of a Wireguard interface\n\n+k8s:deepcopy-gen=true",
+      "description": "Status of a WireGuard interface\n\n+k8s:deepcopy-gen=true",
       "properties": {
         "listen-port": {
-          "description": "Port on which the Wireguard endpoint is exposed",
+          "description": "Port on which the WireGuard endpoint is exposed",
           "type": "integer"
         },
         "name": {
@@ -9963,7 +10931,7 @@ func init() {
           "type": "integer"
         },
         "peers": {
-          "description": "Optional list of wireguard peers",
+          "description": "Optional list of WireGuard peers",
           "type": "array",
           "items": {
             "$ref": "#/definitions/WireguardPeer"
@@ -9976,7 +10944,7 @@ func init() {
       }
     },
     "WireguardPeer": {
-      "description": "Status of a Wireguard peer\n\n+k8s:deepcopy-gen=true",
+      "description": "Status of a WireGuard peer\n\n+k8s:deepcopy-gen=true",
       "properties": {
         "allowed-ips": {
           "description": "List of IPs which may be routed through this peer",
@@ -10009,10 +10977,10 @@ func init() {
       }
     },
     "WireguardStatus": {
-      "description": "Status of the Wireguard agent\n\n+k8s:deepcopy-gen=true",
+      "description": "Status of the WireGuard agent\n\n+k8s:deepcopy-gen=true",
       "properties": {
         "interfaces": {
-          "description": "Wireguard interfaces managed by this Cilium instance",
+          "description": "WireGuard interfaces managed by this Cilium instance",
           "type": "array",
           "items": {
             "$ref": "#/definitions/WireguardInterface"
@@ -10026,11 +10994,57 @@ func init() {
     }
   },
   "parameters": {
+    "bgp-afi": {
+      "type": "string",
+      "description": "Address Family Indicator (AFI) of a BGP route",
+      "name": "afi",
+      "in": "query",
+      "required": true
+    },
+    "bgp-neighbor-address": {
+      "type": "string",
+      "description": "IP address specifying a BGP neighbor.\nHas to be specified only when table type is adj-rib-in or adj-rib-out.\n",
+      "name": "neighbor",
+      "in": "query"
+    },
+    "bgp-router-asn": {
+      "type": "integer",
+      "description": "Autonomous System Number (ASN) identifying a BGP virtual router instance.\nIf not specified, all virtual router instances are selected.\n",
+      "name": "router_asn",
+      "in": "query"
+    },
+    "bgp-safi": {
+      "type": "string",
+      "description": "Subsequent Address Family Indicator (SAFI) of a BGP route",
+      "name": "safi",
+      "in": "query",
+      "required": true
+    },
+    "bgp-table-type": {
+      "enum": [
+        "loc-rib",
+        "adj-rib-in",
+        "adj-rib-out"
+      ],
+      "type": "string",
+      "description": "BGP Routing Information Base (RIB) table type",
+      "name": "table_type",
+      "in": "query",
+      "required": true
+    },
     "cidr": {
       "type": "string",
       "description": "A CIDR range of IPs",
       "name": "cidr",
       "in": "query"
+    },
+    "endpoint-batch-delete-request": {
+      "name": "endpoint",
+      "in": "body",
+      "required": true,
+      "schema": {
+        "$ref": "#/definitions/EndpointBatchDeleteRequest"
+      }
     },
     "endpoint-change-request": {
       "name": "endpoint",
@@ -10042,7 +11056,7 @@ func init() {
     },
     "endpoint-id": {
       "type": "string",
-      "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - container-id: Container runtime ID, e.g. container-id:22222\n  - container-name: Container name, e.g. container-name:foobar\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
+      "description": "String describing an endpoint with the format ` + "`" + `` + "`" + `[prefix:]id` + "`" + `` + "`" + `. If no prefix\nis specified, a prefix of ` + "`" + `` + "`" + `cilium-local:` + "`" + `` + "`" + ` is assumed. Not all endpoints\nwill be addressable by all endpoint ID prefixes with the exception of the\nlocal Cilium UUID which is assigned to all endpoints.\n\nSupported endpoint id prefixes:\n  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595\n  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343\n  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0\n  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)\n  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)\n  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)\n  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1\n  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444\n",
       "name": "id",
       "in": "path",
       "required": true
@@ -10118,6 +11132,21 @@ func init() {
       "name": "pod",
       "in": "path",
       "required": true
+    },
+    "policy-replace": {
+      "type": "boolean",
+      "description": "If true, indicates that existing rules with identical labels should be replaced.",
+      "name": "replace",
+      "in": "query"
+    },
+    "policy-replace-with-labels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "If present, indicates that existing rules with the given labels should be deleted.",
+      "name": "replace-with-labels",
+      "in": "query"
     },
     "policy-rules": {
       "description": "Policy rules",

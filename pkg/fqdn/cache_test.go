@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"regexp"
 	"sort"
+	"testing"
 	"time"
 
 	. "github.com/cilium/checkmate"
@@ -630,9 +631,9 @@ func (ds *DNSCacheTestSuite) TestZombiesSiblingsGC(c *C) {
 	zombies := NewDNSZombieMappings(defaults.ToFQDNsMaxDeferredConnectionDeletes, defaults.ToFQDNsMaxIPsPerHost)
 
 	// Siblings are IPs that resolve to the same name.
-	zombies.Upsert(now, "1.1.1.1", "test.com")
-	zombies.Upsert(now, "1.1.1.2", "test.com")
-	zombies.Upsert(now, "3.3.3.3", "pizza.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.1"), "test.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.2"), "test.com")
+	zombies.Upsert(now, netip.MustParseAddr("3.3.3.3"), "pizza.com")
 
 	// Mark 1.1.1.2 alive which should also keep 1.1.1.1 alive since they
 	// have the same name
@@ -654,8 +655,8 @@ func (ds *DNSCacheTestSuite) TestZombiesGC(c *C) {
 	now := time.Now()
 	zombies := NewDNSZombieMappings(defaults.ToFQDNsMaxDeferredConnectionDeletes, defaults.ToFQDNsMaxIPsPerHost)
 
-	zombies.Upsert(now, "1.1.1.1", "test.com")
-	zombies.Upsert(now, "2.2.2.2", "somethingelse.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.1"), "test.com")
+	zombies.Upsert(now, netip.MustParseAddr("2.2.2.2"), "somethingelse.com")
 
 	// Without any MarkAlive or SetCTGCTime, all entries remain alive
 	alive, dead := zombies.GC()
@@ -667,7 +668,7 @@ func (ds *DNSCacheTestSuite) TestZombiesGC(c *C) {
 
 	// Adding another name to 1.1.1.1 keeps it alive and adds the name to the
 	// zombie
-	zombies.Upsert(now, "1.1.1.1", "anotherthing.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.1"), "anotherthing.com")
 	alive, dead = zombies.GC()
 	c.Assert(dead, HasLen, 0)
 	assertZombiesContain(c, alive, map[string][]string{
@@ -699,8 +700,8 @@ func (ds *DNSCacheTestSuite) TestZombiesGC(c *C) {
 
 	// Update 2.2.2.2 with a new DNS name. It remains alive.
 	// Add 1.1.1.1 again. It is alive.
-	zombies.Upsert(now, "2.2.2.2", "thelastthing.com")
-	zombies.Upsert(now, "1.1.1.1", "onemorething.com")
+	zombies.Upsert(now, netip.MustParseAddr("2.2.2.2"), "thelastthing.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.1"), "onemorething.com")
 
 	alive, dead = zombies.GC()
 	c.Assert(dead, HasLen, 0)
@@ -737,9 +738,9 @@ func (ds *DNSCacheTestSuite) TestZombiesGCOverLimit(c *C) {
 
 	// Limit the total number of IPs to be associated with a specific host
 	// to 1, but associate 'test.com' with multiple IPs.
-	zombies.Upsert(now, "1.1.1.1", "test.com")
-	zombies.Upsert(now, "2.2.2.2", "somethingelse.com", "test.com")
-	zombies.Upsert(now, "3.3.3.3", "anothertest.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.1"), "test.com")
+	zombies.Upsert(now, netip.MustParseAddr("2.2.2.2"), "somethingelse.com", "test.com")
+	zombies.Upsert(now, netip.MustParseAddr("3.3.3.3"), "anothertest.com")
 
 	// Based on the zombie liveness sorting, the '2.2.2.2' entry is more
 	// important (as it could potentially impact multiple apps connecting
@@ -765,7 +766,7 @@ func (ds *DNSCacheTestSuite) TestZombiesGCOverLimitWithCTGC(c *C) {
 	// Limit the number of IPs per hostname, but associate 'test.com' with
 	// more IPs.
 	for i := 0; i < maxConnections+1; i++ {
-		zombies.Upsert(now, fmt.Sprintf("1.1.1.%d", i+1), "test.com")
+		zombies.Upsert(now, netip.MustParseAddr(fmt.Sprintf("1.1.1.%d", i+1)), "test.com")
 	}
 
 	// Simulate that CT garbage collection marks some IPs as live, we'll
@@ -794,9 +795,9 @@ func (ds *DNSCacheTestSuite) TestZombiesGCDeferredDeletes(c *C) {
 	now := time.Now()
 	zombies := NewDNSZombieMappings(defaults.ToFQDNsMaxDeferredConnectionDeletes, defaults.ToFQDNsMaxIPsPerHost)
 
-	zombies.Upsert(now.Add(0*time.Second), "1.1.1.1", "test.com")
-	zombies.Upsert(now.Add(1*time.Second), "2.2.2.2", "somethingelse.com")
-	zombies.Upsert(now.Add(2*time.Second), "3.3.3.3", "onemorething.com")
+	zombies.Upsert(now.Add(0*time.Second), netip.MustParseAddr("1.1.1.1"), "test.com")
+	zombies.Upsert(now.Add(1*time.Second), netip.MustParseAddr("2.2.2.2"), "somethingelse.com")
+	zombies.Upsert(now.Add(2*time.Second), netip.MustParseAddr("3.3.3.3"), "onemorething.com")
 
 	// No zombies should be evicted because the limit is high
 	alive, dead := zombies.GC()
@@ -808,7 +809,7 @@ func (ds *DNSCacheTestSuite) TestZombiesGCDeferredDeletes(c *C) {
 	})
 
 	zombies = NewDNSZombieMappings(2, defaults.ToFQDNsMaxIPsPerHost)
-	zombies.Upsert(now.Add(0*time.Second), "1.1.1.1", "test.com")
+	zombies.Upsert(now.Add(0*time.Second), netip.MustParseAddr("1.1.1.1"), "test.com")
 
 	// No zombies should be evicted because we are below the limit
 	alive, dead = zombies.GC()
@@ -819,8 +820,8 @@ func (ds *DNSCacheTestSuite) TestZombiesGCDeferredDeletes(c *C) {
 
 	// 1.1.1.1 is evicted because it was Upserted earlier in
 	// time, implying an earlier DNS expiry.
-	zombies.Upsert(now.Add(1*time.Second), "2.2.2.2", "somethingelse.com")
-	zombies.Upsert(now.Add(2*time.Second), "3.3.3.3", "onemorething.com")
+	zombies.Upsert(now.Add(1*time.Second), netip.MustParseAddr("2.2.2.2"), "somethingelse.com")
+	zombies.Upsert(now.Add(2*time.Second), netip.MustParseAddr("3.3.3.3"), "onemorething.com")
 	alive, dead = zombies.GC()
 	assertZombiesContain(c, dead, map[string][]string{
 		"1.1.1.1": {"test.com"},
@@ -832,7 +833,7 @@ func (ds *DNSCacheTestSuite) TestZombiesGCDeferredDeletes(c *C) {
 
 	// Only 3.3.3.3 is evicted because it is not marked alive, despite having the
 	// latest insert time.
-	zombies.Upsert(now.Add(0*time.Second), "1.1.1.1", "test.com")
+	zombies.Upsert(now.Add(0*time.Second), netip.MustParseAddr("1.1.1.1"), "test.com")
 	gcTime := now.Add(4 * time.Second)
 	zombies.MarkAlive(gcTime, netip.MustParseAddr("1.1.1.1"))
 	zombies.MarkAlive(gcTime, netip.MustParseAddr("2.2.2.2"))
@@ -852,8 +853,8 @@ func (ds *DNSCacheTestSuite) TestZombiesForceExpire(c *C) {
 	now := time.Now()
 	zombies := NewDNSZombieMappings(defaults.ToFQDNsMaxDeferredConnectionDeletes, defaults.ToFQDNsMaxIPsPerHost)
 
-	zombies.Upsert(now, "1.1.1.1", "test.com", "anothertest.com")
-	zombies.Upsert(now, "2.2.2.2", "somethingelse.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.1"), "test.com", "anothertest.com")
+	zombies.Upsert(now, netip.MustParseAddr("2.2.2.2"), "somethingelse.com")
 
 	// Without any MarkAlive or SetCTGCTime, all entries remain alive
 	alive, dead := zombies.GC()
@@ -884,7 +885,7 @@ func (ds *DNSCacheTestSuite) TestZombiesForceExpire(c *C) {
 	})
 
 	// Setup again with 2 names for test.com
-	zombies.Upsert(now, "2.2.2.2", "test.com")
+	zombies.Upsert(now, netip.MustParseAddr("2.2.2.2"), "test.com")
 
 	// Don't expire if the IP doesn't match
 	err = zombies.ForceExpireByNameIP(time.Time{}, "somethingelse.com", net.ParseIP("1.1.1.1"))
@@ -974,9 +975,9 @@ func (ds *DNSCacheTestSuite) TestZombiesDumpAlive(c *C) {
 	alive := zombies.DumpAlive(nil)
 	c.Assert(alive, HasLen, 0)
 
-	zombies.Upsert(now, "1.1.1.1", "test.com")
-	zombies.Upsert(now, "2.2.2.2", "example.com")
-	zombies.Upsert(now, "3.3.3.3", "example.org")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.1"), "test.com")
+	zombies.Upsert(now, netip.MustParseAddr("2.2.2.2"), "example.com")
+	zombies.Upsert(now, netip.MustParseAddr("3.3.3.3"), "example.org")
 
 	alive = zombies.DumpAlive(nil)
 	assertZombiesContain(c, alive, map[string][]string{
@@ -1015,7 +1016,7 @@ func (ds *DNSCacheTestSuite) TestZombiesDumpAlive(c *C) {
 		"1.1.1.1": {"test.com"},
 	})
 
-	zombies.Upsert(now, "1.1.1.2", "test2.com")
+	zombies.Upsert(now, netip.MustParseAddr("1.1.1.2"), "test2.com")
 
 	alive = zombies.DumpAlive(cidrMatcher)
 	assertZombiesContain(c, alive, map[string][]string{
@@ -1108,4 +1109,172 @@ func (ds *DNSCacheTestSuite) TestOverlimitPreferNewerEntries(c *C) {
 		"1.1.1.9":  {name},
 		"1.1.1.10": {name},
 	})
+}
+
+// Define a test-only string representation to make the output below more readable.
+func (z *DNSZombieMapping) String() string {
+	return fmt.Sprintf(
+		"DNSZombieMapping{AliveAt: %s, DeletePendingAt: %s, Names: %v}",
+		z.AliveAt, z.DeletePendingAt, z.Names,
+	)
+}
+
+func validateZombieSort(t *testing.T, zombies []*DNSZombieMapping) {
+	t.Helper()
+	sl := len(zombies)
+
+	logFailure := func(t *testing.T, zs []*DNSZombieMapping, prop string, i, j int) {
+		t.Helper()
+		t.Logf("order property fail %v: want zombie[i] < zombie[j]", prop)
+		t.Log("zombie[i]: ", zombies[i])
+		t.Log("zombie[j]: ", zombies[j])
+		t.Log("all mappings: ")
+		for i, z := range zombies {
+			t.Log(fmt.Sprintf("%2d", i), z)
+		}
+	}
+	// Don't try to be efficient, just check that the properties we want hold
+	// for every pair of zombie mappings.
+	for i := 0; i < sl; i++ {
+		for j := i + 1; j < sl; j++ {
+			if zombies[i].AliveAt.Before(zombies[j].AliveAt) {
+				continue
+			} else if zombies[i].AliveAt.After(zombies[j].AliveAt) {
+				logFailure(t, zombies, "AliveAt", i, j)
+				t.Fatalf("order wrong: AliveAt: %v is after %v", zombies[i].AliveAt, zombies[j].AliveAt)
+				return
+			}
+
+			if zombies[i].DeletePendingAt.Before(zombies[j].DeletePendingAt) {
+				continue
+			} else if zombies[i].DeletePendingAt.After(zombies[j].DeletePendingAt) {
+				logFailure(t, zombies, "DeletePendingAt", i, j)
+				t.Fatalf("order wrong: DeletePendingAt: %v is after %v", zombies[i].DeletePendingAt, zombies[j].DeletePendingAt)
+				return
+			}
+
+			if len(zombies[i].Names) > len(zombies[j].Names) {
+				logFailure(t, zombies, "len(names)", i, j)
+				t.Fatalf("order wrong: len(names): %v is longer than %v", zombies[i].Names, zombies[j].Names)
+			}
+		}
+	}
+}
+
+func Test_sortZombieMappingSlice(t *testing.T) {
+	// Create three moments in time, so we can have before, equal and after.
+	moments := []time.Time{
+		time.Date(2001, time.January, 1, 1, 1, 1, 0, time.Local),
+		time.Date(2002, time.February, 2, 2, 2, 2, 0, time.Local),
+		time.Date(2003, time.March, 3, 3, 3, 3, 0, time.Local),
+	}
+
+	// Couple of edge cases/hand-picked scenarios. To be complemented by the
+	// randomly generated ones, below.
+	type args struct {
+		zombies []*DNSZombieMapping
+	}
+	tests := []struct {
+		name string
+		args args
+	}{
+		{
+			"empty",
+			args{zombies: nil},
+		},
+		{
+			"single",
+			args{zombies: []*DNSZombieMapping{{
+				Names:           []string{"test.com"},
+				AliveAt:         moments[0],
+				DeletePendingAt: moments[1],
+			}}},
+		},
+		{
+			"swapped alive at",
+			args{zombies: []*DNSZombieMapping{
+				{
+					AliveAt: moments[2],
+				},
+				{
+					AliveAt: moments[0],
+				},
+			}},
+		},
+		{
+			"equal alive, swapped delete pending at",
+			args{zombies: []*DNSZombieMapping{
+				{
+					AliveAt:         moments[0],
+					DeletePendingAt: moments[2],
+				},
+				{
+					AliveAt:         moments[0],
+					DeletePendingAt: moments[1],
+				},
+			}},
+		},
+		{
+			"swapped equal times, tiebreaker",
+			args{zombies: []*DNSZombieMapping{
+				{
+					Names:           []string{"test.com", "test2.com"},
+					AliveAt:         moments[0],
+					DeletePendingAt: moments[1],
+				},
+				{
+					Names:           []string{"test.com"},
+					AliveAt:         moments[0],
+					DeletePendingAt: moments[1],
+				},
+			}},
+		},
+	}
+
+	// Generate zombie mappings which cover all cases of the two times
+	// being either moment 0, 1 or 2, as well as with 0, 1 or 2 names.
+	names := []string{"example.org", "test.com"}
+	nMoments := len(moments)
+	allMappings := make([]*DNSZombieMapping, 0, nMoments*nMoments*nMoments)
+	for _, mi := range moments {
+		for _, mj := range moments {
+			for k := range names {
+				m := DNSZombieMapping{
+					AliveAt:         mi,
+					DeletePendingAt: mj,
+					Names:           names[:k],
+				}
+				allMappings = append(allMappings, &m)
+			}
+		}
+	}
+
+	// Five random tests:
+	for i := 0; i < 5; i++ {
+		ts := make([]*DNSZombieMapping, len(allMappings))
+		copy(ts, allMappings)
+		rand.Shuffle(len(ts), func(i, j int) {
+			ts[i], ts[j] = ts[j], ts[i]
+		})
+		tests = append(tests, struct {
+			name string
+			args args
+		}{
+			name: "Randomised sorting test",
+			args: args{
+				zombies: ts,
+			},
+		})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ol := len(tt.args.zombies)
+			sortZombieMappingSlice(tt.args.zombies)
+			if len(tt.args.zombies) != ol {
+				t.Fatalf("length of slice changed by sorting")
+			}
+			validateZombieSort(t, tt.args.zombies)
+		})
+	}
 }

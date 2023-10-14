@@ -38,10 +38,6 @@ var emptyResources = agentK8s.Resources{}
 
 type fakeWatcherConfiguration struct{}
 
-func (f *fakeWatcherConfiguration) K8sServiceProxyNameValue() string {
-	return ""
-}
-
 func (f *fakeWatcherConfiguration) K8sIngressControllerEnabled() bool {
 	return false
 }
@@ -113,6 +109,10 @@ func (f *fakeSvcManager) DeleteService(frontend loadbalancer.L3n4Addr) (bool, er
 	panic("OnDeleteService(loadbalancer.L3n4Addr) (bool, error) was called and is not set!")
 }
 
+func (f *fakeSvcManager) GetDeepCopyServiceByFrontend(frontend loadbalancer.L3n4Addr) (*loadbalancer.SVC, bool) {
+	return nil, false
+}
+
 func (f *fakeSvcManager) UpsertService(p *loadbalancer.SVC) (bool, loadbalancer.ID, error) {
 	if f.OnUpsertService != nil {
 		return f.OnUpsertService(p)
@@ -133,7 +133,6 @@ func (f *fakeSvcManager) RemoveL7LBService(serviceName, resourceName loadbalance
 }
 
 func (s *K8sWatcherSuite) TestUpdateToServiceEndpointsGH9525(c *C) {
-
 	ep1stApply := &slim_corev1.Endpoints{
 		ObjectMeta: slim_metav1.ObjectMeta{
 			Name:      "foo",
@@ -152,7 +151,6 @@ func (s *K8sWatcherSuite) TestUpdateToServiceEndpointsGH9525(c *C) {
 			},
 		},
 	}
-
 	ep2ndApply := ep1stApply.DeepCopy()
 	ep2ndApply.Subsets[0].Addresses = append(
 		ep2ndApply.Subsets[0].Addresses,
@@ -172,11 +170,11 @@ func (s *K8sWatcherSuite) TestUpdateToServiceEndpointsGH9525(c *C) {
 			c.Assert(ok, Equals, true)
 			switch policyRepositoryCalls {
 			case 0:
-				_, parsedEPs := k8s.ParseEndpoints(ep1stApply)
-				c.Assert(rt.Endpoint.Backends, checker.DeepEquals, parsedEPs.Backends)
+				parsedEPs := k8s.ParseEndpoints(ep1stApply)
+				c.Assert(rt.NewEndpoint.Backends, checker.DeepEquals, parsedEPs.Backends)
 			case 1:
-				_, parsedEPs := k8s.ParseEndpoints(ep2ndApply)
-				c.Assert(rt.Endpoint.Backends, checker.DeepEquals, parsedEPs.Backends)
+				parsedEPs := k8s.ParseEndpoints(ep2ndApply)
+				c.Assert(rt.NewEndpoint.Backends, checker.DeepEquals, parsedEPs.Backends)
 			default:
 				c.Assert(policyRepositoryCalls, Not(Equals), 0, Commentf("policy repository was called more times than expected!"))
 			}
@@ -195,7 +193,6 @@ func (s *K8sWatcherSuite) TestUpdateToServiceEndpointsGH9525(c *C) {
 		policyRepository,
 		nil,
 		dp,
-		nil,
 		nil,
 		nil,
 		nil,
@@ -223,9 +220,9 @@ func (s *K8sWatcherSuite) TestUpdateToServiceEndpointsGH9525(c *C) {
 	}
 
 	w.K8sSvcCache.UpdateService(k8sSvc, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep1stApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep1stApply), swg)
 	// Running a 2nd update should also trigger a new policy update
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
 
 	swg.Stop()
 	swg.Wait()
@@ -523,7 +520,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
 		nil,
 		nil,
 		nil,
-		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
@@ -534,12 +530,12 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
 	swg := lock.NewStoppableWaitGroup()
 
 	w.K8sSvcCache.UpdateService(k8sSvc, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep1stApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep1stApply), swg)
 	// Running a 2nd update should also trigger a new upsert service
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
 	// Running a 3rd update should also not trigger anything because the
 	// endpoints are the same
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
 
 	w.K8sSvcCache.DeleteService(k8sSvc, swg)
 
@@ -677,7 +673,6 @@ func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
 		nil,
 		nil,
 		nil,
-		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
@@ -688,7 +683,7 @@ func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
 	swg := lock.NewStoppableWaitGroup()
 
 	w.K8sSvcCache.UpdateService(k8sSvc, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep1stApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep1stApply), swg)
 	w.K8sSvcCache.UpdateService(k8sSvcChanged, swg)
 
 	swg.Stop()
@@ -1160,7 +1155,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
 		nil,
 		nil,
 		nil,
-		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
@@ -1171,12 +1165,12 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
 	swg := lock.NewStoppableWaitGroup()
 
 	w.K8sSvcCache.UpdateService(k8sSvc, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep1stApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep1stApply), swg)
 	// Running a 2nd update should also trigger a new upsert service
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
-	// Running a 3rd update should not trigger anything because the
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
+	// Running a 3rd update should also not trigger anything because the
 	// endpoints are the same
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
 
 	w.K8sSvcCache.DeleteService(k8sSvc, swg)
 
@@ -1477,7 +1471,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
 		nil,
 		nil,
 		nil,
-		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
@@ -1488,7 +1481,7 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
 	swg := lock.NewStoppableWaitGroup()
 
 	w.K8sSvcCache.UpdateService(k8sSvc1stApply, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep1stApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep1stApply), swg)
 
 	w.K8sSvcCache.UpdateService(k8sSvc2ndApply, swg)
 
@@ -1787,7 +1780,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
 		nil,
 		nil,
 		nil,
-		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
@@ -1798,8 +1790,8 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
 	swg := lock.NewStoppableWaitGroup()
 
 	w.K8sSvcCache.UpdateService(k8sSvc1stApply, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep1stApply, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep1stApply), swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
 
 	swg.Stop()
 	swg.Wait()
@@ -2711,7 +2703,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
 		nil,
 		nil,
 		nil,
-		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
@@ -2722,12 +2713,12 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
 	swg := lock.NewStoppableWaitGroup()
 
 	w.K8sSvcCache.UpdateService(svc1stApply, swg)
-	w.K8sSvcCache.UpdateEndpoints(ep1stApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep1stApply), swg)
 	// Running a 2nd update should also trigger a new upsert service
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
-	// Running a 3rd update should not trigger anything because the
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
+	// Running a 3rd update should also not trigger anything because the
 	// endpoints are the same
-	w.K8sSvcCache.UpdateEndpoints(ep2ndApply, swg)
+	w.K8sSvcCache.UpdateEndpoints(k8s.ParseEndpoints(ep2ndApply), swg)
 
 	w.K8sSvcCache.UpdateService(svc2ndApply, swg)
 

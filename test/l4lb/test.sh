@@ -19,14 +19,14 @@ IMG_TAG=${2:-latest}
 # attach the dummy program.
 apt-get update
 apt-get install -y gcc-multilib libbpf-dev
-clang -O2 -Wall -target bpf -c bpf_xdp_veth_host.c -o bpf_xdp_veth_host.o
+clang -O2 -Wall --target=bpf -c bpf_xdp_veth_host.c -o bpf_xdp_veth_host.o
 
 # The worker (aka backend node) will receive IPIP packets from the LB node.
 # To decapsulate the packets instead of creating an ipip dev which would
 # complicate network setup, we will attach the following program which
 # terminates the tunnel.
 # The program is taken from the Linux kernel selftests.
-clang -O2 -Wall -target bpf -c test_tc_tunnel.c -o test_tc_tunnel.o
+clang -O2 -Wall --target=bpf -c test_tc_tunnel.c -o test_tc_tunnel.o
 
 # With Docker-in-Docker we create two nodes:
 #
@@ -93,7 +93,7 @@ nsenter -t $NGINX_PID -n /bin/sh -c \
     'tc qdisc add dev eth0 clsact && tc filter add dev eth0 ingress bpf direct-action object-file ./test_tc_tunnel.o section decap'
 
 # Wait until Cilium is ready
-while ! docker exec -t lb-node docker exec -t cilium-lb cilium status; do sleep 1; done
+while ! docker exec -t lb-node docker exec -t cilium-lb cilium-dbg status; do sleep 1; done
 
 ##########
 #  TEST  #
@@ -105,7 +105,7 @@ nsenter -t $(docker inspect nginx -f '{{ .State.Pid }}') -n /bin/sh -c \
     "ip a a dev eth0 ${LB_VIP}/32"
 
 docker exec -t lb-node docker exec -t cilium-lb \
-    cilium service update --id 1 --frontend "${LB_VIP}:80" --backends "${WORKER_IP}:80" --k8s-node-port
+    cilium-dbg service update --id 1 --frontend "${LB_VIP}:80" --backends "${WORKER_IP}:80" --k8s-node-port
 
 LB_NODE_IP=$(docker exec lb-node ip -o -4 a s eth0 | awk '{print $4}' | cut -d/ -f1)
 ip r a "${LB_VIP}/32" via "$LB_NODE_IP"
@@ -131,7 +131,7 @@ done
 
 # Set nginx to maintenance
 docker exec -t lb-node docker exec -t cilium-lb \
-    cilium service update --id 1 --frontend "${LB_VIP}:80" --backends "${WORKER_IP}:80" --backend-weights "0" --k8s-node-port
+    cilium-dbg service update --id 1 --frontend "${LB_VIP}:80" --backends "${WORKER_IP}:80" --backend-weights "0" --k8s-node-port
 
 # Do not stop on error
 set +e

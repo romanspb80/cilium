@@ -114,7 +114,7 @@ const (
 	NoTrackAlias = Prefix + ".no-track-port"
 
 	// WireguardPubKey / WireguardPubKeyAlias is the annotation name used to store
-	// the Wireguard public key in the CiliumNode CRD that we need to use to encrypt
+	// the WireGuard public key in the CiliumNode CRD that we need to use to encrypt
 	// traffic to that node.
 	WireguardPubKey      = NetworkPrefix + "/wg-pub-key"
 	WireguardPubKeyAlias = Prefix + ".network.wg-pub-key"
@@ -126,6 +126,14 @@ const (
 	// IPAMPoolKey is the annotation name used to store the IPAM pool name from
 	// which workloads should allocate their IP from
 	IPAMPoolKey = IPAMPrefix + "/ip-pool"
+
+	// IPAMIPv4PoolKey is the annotation name used to store the IPAM IPv4 pool name from
+	// which workloads should allocate their IP from
+	IPAMIPv4PoolKey = IPAMPrefix + "/ipv4-pool"
+
+	// IPAMIPv6PoolKey is the annotation name used to store the IPAM IPv6 pool name from
+	// which workloads should allocate their IP from
+	IPAMIPv6PoolKey = IPAMPrefix + "/ipv6-pool"
 )
 
 // Get returns the annotation value associated with the given key, or any of

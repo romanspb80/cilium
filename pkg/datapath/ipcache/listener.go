@@ -25,7 +25,11 @@ import (
 	"github.com/cilium/cilium/pkg/source"
 )
 
-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "datapath-ipcache")
+var (
+	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "datapath-ipcache")
+
+	ipcacheBPFGCControllerGroup = controller.NewGroup("ipcache-bpf-garbage-collection")
+)
 
 // datapath is an interface to the datapath implementation, used to apply
 // changes that are made within this module.
@@ -117,7 +121,7 @@ func (l *BPFListener) notifyMonitor(modType ipcache.CacheModification,
 // is not required to upsert the new pair.
 func (l *BPFListener) OnIPIdentityCacheChange(modType ipcache.CacheModification, cidrCluster cmtypes.PrefixCluster,
 	oldHostIP, newHostIP net.IP, oldID *ipcache.Identity, newID ipcache.Identity,
-	encryptKey uint8, nodeID uint16, k8sMeta *ipcache.K8sMetadata) {
+	encryptKey uint8, k8sMeta *ipcache.K8sMetadata) {
 	cidr := cidrCluster.AsIPNet()
 
 	scopedLog := log
@@ -139,14 +143,13 @@ func (l *BPFListener) OnIPIdentityCacheChange(modType ipcache.CacheModification,
 
 	// Update BPF Maps.
 
-	key := ipcacheMap.NewKey(cidr.IP, cidr.Mask, 0)
+	key := ipcacheMap.NewKey(cidr.IP, cidr.Mask, uint8(cidrCluster.ClusterID()))
 
 	switch modType {
 	case ipcache.Upsert:
 		value := ipcacheMap.RemoteEndpointInfo{
 			SecurityIdentity: uint32(newID.ID),
 			Key:              encryptKey,
-			NodeID:           nodeID,
 		}
 
 		if newHostIP != nil {
@@ -189,7 +192,7 @@ func (l *BPFListener) OnIPIdentityCacheChange(modType ipcache.CacheModification,
 // do not exist in the in-memory ipcache.
 //
 // Must be called while holding l.ipcache.Lock for reading.
-func (l *BPFListener) updateStaleEntriesFunction(keysToRemove map[string]*ipcacheMap.Key) bpf.DumpCallback {
+func (l *BPFListener) updateStaleEntriesFunction(keysToRemove map[string]ipcacheMap.Key) bpf.DumpCallback {
 	return func(key bpf.MapKey, _ bpf.MapValue) {
 		k := key.(*ipcacheMap.Key)
 		keyToIP := k.String()
@@ -200,7 +203,7 @@ func (l *BPFListener) updateStaleEntriesFunction(keysToRemove map[string]*ipcach
 			case source.KVStore, source.Local:
 				// Cannot delete from map during callback because DumpWithCallback
 				// RLocks the map.
-				keysToRemove[keyToIP] = k.DeepCopy()
+				keysToRemove[keyToIP] = *k
 			}
 		}
 	}
@@ -222,7 +225,7 @@ func (l *BPFListener) garbageCollect(ctx context.Context) (*sync.WaitGroup, erro
 	l.ipcache.RLock()
 	defer l.ipcache.RUnlock()
 
-	keysToRemove := map[string]*ipcacheMap.Key{}
+	keysToRemove := map[string]ipcacheMap.Key{}
 	if err := l.bpfMap.DumpWithCallback(l.updateStaleEntriesFunction(keysToRemove)); err != nil {
 		return nil, fmt.Errorf("error dumping ipcache BPF map: %s", err)
 	}
@@ -232,7 +235,7 @@ func (l *BPFListener) garbageCollect(ctx context.Context) (*sync.WaitGroup, erro
 	for _, k := range keysToRemove {
 		log.WithFields(logrus.Fields{logfields.BPFMapKey: k}).
 			Debug("deleting from ipcache BPF map")
-		if err := l.bpfMap.Delete(k); err != nil {
+		if err := l.bpfMap.Delete(&k); err != nil {
 			return nil, fmt.Errorf("error deleting key %s from ipcache BPF map: %s", k, err)
 		}
 	}
@@ -252,6 +255,7 @@ func (l *BPFListener) OnIPIdentityCacheGC() {
 	// consistent state.
 	l.ipcache.UpdateController("ipcache-bpf-garbage-collection",
 		controller.ControllerParams{
+			Group: ipcacheBPFGCControllerGroup,
 			DoFunc: func(ctx context.Context) error {
 				wg, err := l.garbageCollect(ctx)
 				if err != nil {

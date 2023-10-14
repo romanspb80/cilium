@@ -5,6 +5,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -25,6 +26,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/stream"
 )
 
 var (
@@ -45,6 +47,8 @@ type CachingIdentityAllocator struct {
 	globalIdentityAllocatorInitialized chan struct{}
 
 	localIdentities *localIdentityCache
+
+	localNodeIdentities *localIdentityCache
 
 	identitiesPath string
 
@@ -78,6 +82,9 @@ type IdentityAllocatorOwner interface {
 // identities based of sets of labels, and caching information about identities
 // locally.
 type IdentityAllocator interface {
+	// Identity changes are observable.
+	stream.Observable[IdentityChange]
+
 	// WaitForInitialGlobalIdentities waits for the initial set of global
 	// security identities to have been received.
 	WaitForInitialGlobalIdentities(context.Context) error
@@ -248,7 +255,8 @@ func NewCachingIdentityAllocator(owner IdentityAllocatorOwner) *CachingIdentityA
 
 	// Local identity cache can be created synchronously since it doesn't
 	// rely upon any external resources (e.g., external kvstore).
-	m.localIdentities = newLocalIdentityCache(identity.MinAllocatorLocalIdentity, identity.MaxAllocatorLocalIdentity, m.events)
+	m.localIdentities = newLocalIdentityCache(identity.IdentityScopeLocal, identity.MinAllocatorLocalIdentity, identity.MaxAllocatorLocalIdentity, m.events)
+	m.localNodeIdentities = newLocalIdentityCache(identity.IdentityScopeRemoteNode, identity.MinAllocatorLocalIdentity, identity.MaxAllocatorLocalIdentity, m.events)
 
 	return m
 }
@@ -270,9 +278,9 @@ func (m *CachingIdentityAllocator) Close() {
 
 	m.IdentityAllocator.Delete()
 	if m.events != nil {
-		// Have the now only remaining writing party close the events channel,
-		// to ensure we don't panic with 'send on closed channel'.
 		m.localIdentities.close()
+		m.localNodeIdentities.close()
+		close(m.events)
 		m.events = nil
 	}
 
@@ -310,6 +318,8 @@ func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls la
 			if allocated || isNewLocally {
 				if id.ID.HasLocalScope() {
 					metrics.Identity.WithLabelValues(identity.NodeLocalIdentityType).Inc()
+				} else if id.ID.HasRemoteNodeScope() {
+					metrics.Identity.WithLabelValues(identity.RemoteNodeIdentityType).Inc()
 				} else if id.ID.IsReservedIdentity() {
 					metrics.Identity.WithLabelValues(identity.ReservedIdentityType).Inc()
 				} else {
@@ -344,8 +354,13 @@ func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls la
 		return reservedIdentity, false, nil
 	}
 
-	if !identity.RequiresGlobalIdentity(lbls) {
+	// If the set of labels uses non-global scope,
+	// then allocate with the appropriate local allocator and return.
+	switch identity.ScopeForLabels(lbls) {
+	case identity.IdentityScopeLocal:
 		return m.localIdentities.lookupOrCreate(lbls, oldNID)
+	case identity.IdentityScopeRemoteNode:
+		return m.localNodeIdentities.lookupOrCreate(lbls, oldNID)
 	}
 
 	// This will block until the kvstore can be accessed and all identities
@@ -387,6 +402,8 @@ func (m *CachingIdentityAllocator) Release(ctx context.Context, id *identity.Ide
 		if released {
 			if id.ID.HasLocalScope() {
 				metrics.Identity.WithLabelValues(identity.NodeLocalIdentityType).Dec()
+			} else if id.ID.HasRemoteNodeScope() {
+				metrics.Identity.WithLabelValues(identity.RemoteNodeIdentityType).Dec()
 			} else if id.ID.IsReservedIdentity() {
 				metrics.Identity.WithLabelValues(identity.ReservedIdentityType).Dec()
 			} else {
@@ -406,8 +423,11 @@ func (m *CachingIdentityAllocator) Release(ctx context.Context, id *identity.Ide
 		return false, nil
 	}
 
-	if !identity.RequiresGlobalIdentity(id.Labels) {
+	switch identity.ScopeForLabels(id.Labels) {
+	case identity.IdentityScopeLocal:
 		return m.localIdentities.release(id), nil
+	case identity.IdentityScopeRemoteNode:
+		return m.localNodeIdentities.release(id), nil
 	}
 
 	// This will block until the kvstore can be accessed and all identities
@@ -450,27 +470,98 @@ func (m *CachingIdentityAllocator) ReleaseSlice(ctx context.Context, identities 
 	return err
 }
 
-// WatchRemoteIdentities starts watching for identities in another kvstore and
-// syncs all identities to the local identity cache. remoteName must be unique,
-// unless replacing the kvstore for an existing remote.
-func (m *CachingIdentityAllocator) WatchRemoteIdentities(remoteName string, backend kvstore.BackendOperations) (*allocator.RemoteCache, error) {
+// WatchRemoteIdentities returns a RemoteCache instance which can be later
+// started to watch identities in another kvstore and sync them to the local
+// identity cache. remoteName should be unique unless replacing an existing
+// remote's backend. When cachedPrefix is set, identities are assumed to be
+// stored under the "cilium/cache" prefix, and the watcher is adapted accordingly.
+func (m *CachingIdentityAllocator) WatchRemoteIdentities(remoteName string, backend kvstore.BackendOperations, cachedPrefix bool) (*allocator.RemoteCache, error) {
 	<-m.globalIdentityAllocatorInitialized
 
-	remoteAllocatorBackend, err := kvstoreallocator.NewKVStoreBackend(m.identitiesPath, m.owner.GetNodeSuffix(), &key.GlobalIdentity{}, backend)
+	prefix := m.identitiesPath
+	if cachedPrefix {
+		prefix = path.Join(kvstore.StateToCachePrefix(prefix), remoteName)
+	}
+
+	remoteAllocatorBackend, err := kvstoreallocator.NewKVStoreBackend(prefix, m.owner.GetNodeSuffix(), &key.GlobalIdentity{}, backend)
 	if err != nil {
 		return nil, fmt.Errorf("error setting up remote allocator backend: %s", err)
 	}
 
-	remoteAlloc, err := allocator.NewAllocator(&key.GlobalIdentity{}, remoteAllocatorBackend, allocator.WithEvents(m.IdentityAllocator.GetEvents()), allocator.WithoutGC())
+	remoteAlloc, err := allocator.NewAllocator(&key.GlobalIdentity{}, remoteAllocatorBackend,
+		allocator.WithEvents(m.IdentityAllocator.GetEvents()), allocator.WithoutGC(), allocator.WithoutAutostart())
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize remote Identity Allocator: %s", err)
 	}
 
-	return m.IdentityAllocator.WatchRemoteKVStore(remoteName, remoteAlloc), nil
+	return m.IdentityAllocator.NewRemoteCache(remoteName, remoteAlloc), nil
 }
 
 func (m *CachingIdentityAllocator) RemoveRemoteIdentities(name string) {
 	if m.IdentityAllocator != nil {
 		m.IdentityAllocator.RemoveRemoteKVStore(name)
 	}
+}
+
+type IdentityChangeKind string
+
+const (
+	IdentityChangeSync   IdentityChangeKind = IdentityChangeKind(allocator.AllocatorChangeSync)
+	IdentityChangeUpsert IdentityChangeKind = IdentityChangeKind(allocator.AllocatorChangeUpsert)
+	IdentityChangeDelete IdentityChangeKind = IdentityChangeKind(allocator.AllocatorChangeDelete)
+)
+
+type IdentityChange struct {
+	Kind   IdentityChangeKind
+	ID     identity.NumericIdentity
+	Labels labels.Labels
+}
+
+// Observe the identity changes. Conforms to stream.Observable.
+// Replays the current state of the cache when subscribing.
+func (m *CachingIdentityAllocator) Observe(ctx context.Context, next func(IdentityChange), complete func(error)) {
+	// This short-lived go routine serves the purpose of waiting for the global identity allocator becoming ready
+	// before starting to observe the underlying allocator for changes.
+	// m.IdentityAllocator is backed by a stream.FuncObservable, that will start its own
+	// go routine. Therefore, the current go routine will stop and free the lock on the setupMutex after the registration.
+	go func() {
+		if err := m.WaitForInitialGlobalIdentities(ctx); err != nil {
+			complete(ctx.Err())
+			return
+		}
+
+		m.setupMutex.Lock()
+		defer m.setupMutex.Unlock()
+
+		if m.IdentityAllocator == nil {
+			complete(errors.New("allocator no longer initialized"))
+			return
+		}
+
+		// Observe the underlying allocator for changes and map the events to identities.
+		stream.Map[allocator.AllocatorChange, IdentityChange](
+			m.IdentityAllocator,
+			func(change allocator.AllocatorChange) IdentityChange {
+				return IdentityChange{
+					Kind:   IdentityChangeKind(change.Kind),
+					ID:     identity.NumericIdentity(change.ID),
+					Labels: mapLabels(change.Key),
+				}
+			},
+		).Observe(ctx, next, complete)
+	}()
+}
+
+func mapLabels(allocatorKey allocator.AllocatorKey) labels.Labels {
+	var idLabels labels.Labels = nil
+
+	if allocatorKey != nil {
+		idLabels = labels.Labels{}
+		for k, v := range allocatorKey.GetAsMap() {
+			label := labels.ParseLabel(k + "=" + v)
+			idLabels[label.Key] = label
+		}
+	}
+
+	return idLabels
 }

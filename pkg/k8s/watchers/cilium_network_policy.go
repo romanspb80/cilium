@@ -32,6 +32,8 @@ import (
 	"github.com/cilium/cilium/pkg/spanstat"
 )
 
+var syncCNPStatusControllerGroup = controller.NewGroup("sync-cnp-policy-status")
+
 // ruleImportMetadataCache maps the unique identifier of a CiliumNetworkPolicy
 // (namespace and name) to metadata about the importing of the rule into the
 // agent's policy repository at the time said rule was imported (revision
@@ -227,23 +229,13 @@ func (k *K8sWatcher) onUpsert(
 ) error {
 	initialRecvTime := time.Now()
 
-	var (
-		equal  bool
-		action string
-	)
-
-	// wrap k.K8sEventReceived call into a naked func() to capture equal in the closure
 	defer func() {
-		k.K8sEventReceived(apiGroup, metricLabel, action, true, equal)
+		k.k8sResourceSynced.SetEventTimestamp(apiGroup)
 	}()
 
 	oldCNP, ok := cnpCache[key]
-	if !ok {
-		action = resources.MetricCreate
-	} else {
-		action = resources.MetricUpdate
+	if ok {
 		if oldCNP.DeepEqual(cnp) {
-			equal = true
 			return nil
 		}
 	}
@@ -252,14 +244,16 @@ func (k *K8sWatcher) onUpsert(
 		return nil
 	}
 
-	// check if this cnp was referencing or is now referencing a
+	// check if this cnp was referencing or is now referencing at least one non-empty
 	// CiliumCIDRGroup and update the relevant metric accordingly.
-	if len(getCIDRGroupRefs(cnp)) > 0 {
+	cidrGroupRefs := getCIDRGroupRefs(cnp)
+	cidrsSets, _ := cidrGroupRefsToCIDRsSets(cidrGroupRefs, cidrGroupCache)
+	if len(cidrsSets) > 0 {
 		cidrGroupPolicies[key] = struct{}{}
 	} else {
 		delete(cidrGroupPolicies, key)
 	}
-	metrics.CIDRGroupPolicies.Set(float64(len(cidrGroupPolicies)))
+	metrics.CIDRGroupsReferenced.Set(float64(len(cidrGroupPolicies)))
 
 	// We need to deepcopy this structure because we are writing
 	// fields.
@@ -280,8 +274,6 @@ func (k *K8sWatcher) onUpsert(
 		cnpCache[key] = cnpCpy
 	}
 
-	k.K8sEventProcessed(metricLabel, action, err == nil)
-
 	return err
 }
 
@@ -298,10 +290,9 @@ func (k *K8sWatcher) onDelete(
 	delete(cache, key)
 
 	delete(cidrGroupPolicies, key)
-	metrics.CIDRGroupPolicies.Set(float64(len(cidrGroupPolicies)))
+	metrics.CIDRGroupsReferenced.Set(float64(len(cidrGroupPolicies)))
 
-	k.K8sEventProcessed(metricLabel, resources.MetricDelete, err == nil)
-	k.K8sEventReceived(apiGroup, metricLabel, resources.MetricDelete, true, true)
+	k.k8sResourceSynced.SetEventTimestamp(apiGroup)
 
 	return err
 }
@@ -333,7 +324,6 @@ func (k *K8sWatcher) addCiliumNetworkPolicyV2(ciliumNPClient clientset.Interface
 	}
 
 	if policyImportErr != nil {
-		metrics.PolicyImportErrorsTotal.Inc() // Deprecated in Cilium 1.14, to be removed in 1.15.
 		scopedLog.WithError(policyImportErr).Warn("Unable to add CiliumNetworkPolicy")
 	} else {
 		scopedLog.Info("Imported CiliumNetworkPolicy")
@@ -356,8 +346,11 @@ func (k *K8sWatcher) addCiliumNetworkPolicyV2(ciliumNPClient clientset.Interface
 		ctrlName := cnp.GetControllerName()
 		k8sCM.UpdateController(ctrlName,
 			controller.ControllerParams{
+				Group: syncCNPStatusControllerGroup,
 				DoFunc: func(ctx context.Context) error {
-					return updateContext.UpdateStatus(ctx, cnp, rev, policyImportErr)
+					// We need to deep-copy the CNP object because UpdateStatus modifies it
+					// to clear the LastAppliedConfiguration key from annotations map.
+					return updateContext.UpdateStatus(ctx, cnp.DeepCopy(), rev, policyImportErr)
 				},
 			},
 		)
@@ -405,12 +398,10 @@ func (k *K8sWatcher) updateCiliumNetworkPolicyV2(ciliumNPClient clientset.Interf
 		// update to the new policy will be skipped.
 		switch {
 		case ns != "" && !errors.Is(err, cilium_v2.ErrEmptyCNP):
-			metrics.PolicyImportErrorsTotal.Inc() // Deprecated in Cilium 1.14, to be removed in 1.15.
 			log.WithError(err).WithField(logfields.Object, logfields.Repr(oldRuleCpy)).
 				Warn("Error parsing old CiliumNetworkPolicy rule")
 			return err
 		case ns == "" && !errors.Is(err, cilium_v2.ErrEmptyCCNP):
-			metrics.PolicyImportErrorsTotal.Inc() // Deprecated in Cilium 1.14, to be removed in 1.15.
 			log.WithError(err).WithField(logfields.Object, logfields.Repr(oldRuleCpy)).
 				Warn("Error parsing old CiliumClusterwideNetworkPolicy rule")
 			return err
@@ -419,7 +410,6 @@ func (k *K8sWatcher) updateCiliumNetworkPolicyV2(ciliumNPClient clientset.Interf
 
 	_, err = newRuleCpy.Parse()
 	if err != nil {
-		metrics.PolicyImportErrorsTotal.Inc() // Deprecated in Cilium 1.14, to be removed in 1.15.
 		log.WithError(err).WithField(logfields.Object, logfields.Repr(newRuleCpy)).
 			Warn("Error parsing new CiliumNetworkPolicy rule")
 		return err
@@ -491,8 +481,11 @@ func (k *K8sWatcher) updateCiliumNetworkPolicyV2AnnotationsOnly(ciliumNPClient c
 
 	k8sCM.UpdateController(ctrlName,
 		controller.ControllerParams{
+			Group: syncCNPStatusControllerGroup,
 			DoFunc: func(ctx context.Context) error {
-				return updateContext.UpdateStatus(ctx, cnp, meta.revision, meta.policyImportError)
+				// We need to deep-copy the CNP object because UpdateStatus modifies it
+				// to clear the LastAppliedConfiguration key from annotations map.
+				return updateContext.UpdateStatus(ctx, cnp.DeepCopy(), meta.revision, meta.policyImportError)
 			},
 		})
 

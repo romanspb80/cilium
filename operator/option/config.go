@@ -23,14 +23,25 @@ const (
 	// EndpointGCIntervalDefault is the default time for the CEP GC
 	EndpointGCIntervalDefault = 5 * time.Minute
 
-	// PrometheusServeAddr is the default server address for operator metrics
-	PrometheusServeAddr = ":9963"
-
 	// CESMaxCEPsInCESDefault is the maximum number of cilium endpoints allowed in a CES
 	CESMaxCEPsInCESDefault = 100
 
 	// CESSlicingModeDefault is default method for grouping CEP in a CES.
 	CESSlicingModeDefault = "cesSliceModeIdentity"
+
+	// CESWriteQPSLimitDefault is the default rate limit for the CES work queue.
+	CESWriteQPSLimitDefault = 10
+
+	// CESWriteQPSLimitMax is the maximum rate limit for the CES work queue.
+	// CES work queue QPS limit cannot exceed this value, regardless of other config.
+	CESWriteQPSLimitMax = 50
+
+	// CESWriteQPSBurstDefault is the default burst rate for the CES work queue.
+	CESWriteQPSBurstDefault = 20
+
+	// CESWriteQPSBurstMax is the maximum burst rate for the CES work queue.
+	// CES work queue QPS burst cannot exceed this value, regardless of other config.
+	CESWriteQPSBurstMax = 100
 
 	// CNPStatusCleanupQPSDefault is the default rate for the CNP NodeStatus updates GC.
 	CNPStatusCleanupQPSDefault = 10
@@ -90,10 +101,6 @@ const (
 	// NodesGCInterval is the duration for which the cilium nodes are GC.
 	NodesGCInterval = "nodes-gc-interval"
 
-	// OperatorPrometheusServeAddr IP:Port on which to serve prometheus
-	// metrics (pass ":Port" to bind on all interfaces, "" is off).
-	OperatorPrometheusServeAddr = "operator-prometheus-serve-addr"
-
 	// SyncK8sServices synchronizes k8s services into the kvstore
 	SyncK8sServices = "synchronize-k8s-services"
 
@@ -120,8 +127,8 @@ const (
 	// IPAMInstanceTagFilter are optional tags used to filter instances for ENI discovery ; only used with AWS IPAM mode for now
 	IPAMInstanceTags = "instance-tags-filter"
 
-	// IPAMMultiPoolMap are IP pool definitions used for the multi-pool IPAM mode.
-	IPAMMultiPoolMap = "multi-pool-map"
+	// IPAMAutoCreateCiliumPodIPPools contains pre-defined IP pools to be auto-created on startup.
+	IPAMAutoCreateCiliumPodIPPools = "auto-create-cilium-pod-ip-pools"
 
 	// ClusterPoolIPv4CIDR is the cluster's IPv4 CIDR to allocate
 	// individual PodCIDR ranges from when using the ClusterPool ipam mode.
@@ -225,15 +232,6 @@ const (
 	// the number of API calls to AlibabaCloud ECS service.
 	AlibabaCloudReleaseExcessIPs = "alibaba-cloud-release-excess-ips"
 
-	// CiliumEndpointSlice options
-
-	// CESMaxCEPsInCES is the maximum number of cilium endpoints allowed in single
-	// a CiliumEndpointSlice resource.
-	CESMaxCEPsInCES = "ces-max-ciliumendpoints-per-ces"
-
-	// CESSlicingMode instructs how CEPs are grouped in a CES.
-	CESSlicingMode = "ces-slice-mode"
-
 	// LoadBalancerL7 enables loadbalancer capabilities for services via envoy proxy
 	LoadBalancerL7 = "loadbalancer-l7"
 
@@ -302,6 +300,15 @@ const (
 	// Applicable values: dedicated, shared
 	IngressDefaultLoadbalancerMode = "ingress-default-lb-mode"
 
+	// IngressDefaultSecretNamespace is the default secret namespace for Ingress.
+	IngressDefaultSecretNamespace = "ingress-default-secret-namespace"
+
+	// IngressDefaultSecretName is the default secret name for Ingress.
+	IngressDefaultSecretName = "ingress-default-secret-name"
+
+	// IngressDefaultXffNumTrustedHops is the default XffNumTrustedHops value for Ingress.
+	IngressDefaultXffNumTrustedHops = "ingress-default-xff-num-trusted-hops"
+
 	// PodRestartSelector specify the labels contained in the pod that needs to be restarted before the node can be de-stained
 	// default values: k8s-app=kube-dns
 	PodRestartSelector = "pod-restart-selector"
@@ -342,8 +349,6 @@ type OperatorConfig struct {
 	// Note that only one node per cluster should run this, and most iterations
 	// will simply return.
 	EndpointGCInterval time.Duration
-
-	OperatorPrometheusServeAddr string
 
 	// SyncK8sServices synchronizes k8s services into the kvstore
 	SyncK8sServices bool
@@ -408,8 +413,8 @@ type OperatorConfig struct {
 	// per node.
 	NodeCIDRMaskSizeIPv6 int
 
-	// IPAMMultiPoolMap are IP pool definitions used for the multi-pool IPAM mode.
-	IPAMMultiPoolMap map[string]string
+	// IPAMAutoCreateCiliumPodIPPools contains pre-defined IP pools to be auto-created on startup.
+	IPAMAutoCreateCiliumPodIPPools map[string]string
 
 	// AWS options
 
@@ -484,16 +489,6 @@ type OperatorConfig struct {
 	// the number of API calls to AlibabaCloud ECS service.
 	AlibabaCloudReleaseExcessIPs bool
 
-	// CiliumEndpointSlice options
-
-	// CESMaxCEPsInCES is the maximum number of CiliumEndpoints allowed in single
-	// a CiliumEndpointSlice resource.
-	// The default value of maximum CiliumEndpoints allowed in a CiliumEndpointSlice resource is 100.
-	CESMaxCEPsInCES int
-
-	// CESSlicingMode instructs how CEPs are grouped in a CES.
-	CESSlicingMode string
-
 	// LoadBalancerL7 enables loadbalancer capabilities for services.
 	LoadBalancerL7 string
 
@@ -557,6 +552,17 @@ type OperatorConfig struct {
 	// Applicable values: dedicated, shared
 	IngressDefaultLoadbalancerMode string
 
+	// IngressDefaultLSecretNamespace is the default secret namespace for Ingress.
+	IngressDefaultSecretNamespace string
+
+	// IngressDefaultLSecretName is the default secret name for Ingress.
+	IngressDefaultSecretName string
+
+	// IngressProxyXffNumTrustedHops The number of additional ingress proxy hops from the right side of the
+	// HTTP header to trust when determining the origin client's IP address.
+	//The default is zero if this option is not specified.
+	IngressProxyXffNumTrustedHops uint32
+
 	// PodRestartSelector specify the labels contained in the pod that needs to be restarted before the node can be de-stained
 	PodRestartSelector string
 }
@@ -571,7 +577,6 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.CNPStatusCleanupBurst = vp.GetInt(CNPStatusCleanupBurst)
 	c.EnableMetrics = vp.GetBool(EnableMetrics)
 	c.EndpointGCInterval = vp.GetDuration(EndpointGCInterval)
-	c.OperatorPrometheusServeAddr = vp.GetString(OperatorPrometheusServeAddr)
 	c.SyncK8sServices = vp.GetBool(SyncK8sServices)
 	c.SyncK8sNodes = vp.GetBool(SyncK8sNodes)
 	c.UnmanagedPodWatcherInterval = vp.GetInt(UnmanagedPodWatcherInterval)
@@ -605,6 +610,9 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.IngressLBAnnotationPrefixes = vp.GetStringSlice(IngressLBAnnotationPrefixes)
 	c.IngressSharedLBServiceName = vp.GetString(IngressSharedLBServiceName)
 	c.IngressDefaultLoadbalancerMode = vp.GetString(IngressDefaultLoadbalancerMode)
+	c.IngressDefaultSecretNamespace = vp.GetString(IngressDefaultSecretNamespace)
+	c.IngressDefaultSecretName = vp.GetString(IngressDefaultSecretName)
+	c.IngressProxyXffNumTrustedHops = vp.GetUint32(IngressDefaultXffNumTrustedHops)
 	c.PodRestartSelector = vp.GetString(PodRestartSelector)
 
 	c.CiliumK8sNamespace = vp.GetString(CiliumK8sNamespace)
@@ -651,10 +659,6 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.AlibabaCloudVPCID = vp.GetString(AlibabaCloudVPCID)
 	c.AlibabaCloudReleaseExcessIPs = vp.GetBool(AlibabaCloudReleaseExcessIPs)
 
-	// CiliumEndpointSlice options
-	c.CESMaxCEPsInCES = vp.GetInt(CESMaxCEPsInCES)
-	c.CESSlicingMode = vp.GetString(CESSlicingMode)
-
 	// Option maps and slices
 
 	if m := vp.GetStringSlice(IPAMSubnetsIDs); len(m) != 0 {
@@ -691,20 +695,20 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 		c.ENIGarbageCollectionTags = m
 	}
 
-	if m, err := command.GetStringMapStringE(vp, IPAMMultiPoolMap); err != nil {
-		log.Fatalf("unable to parse %s: %s", IPAMMultiPoolMap, err)
+	if m, err := command.GetStringMapStringE(vp, IPAMAutoCreateCiliumPodIPPools); err != nil {
+		log.Fatalf("unable to parse %s: %s", IPAMAutoCreateCiliumPodIPPools, err)
 	} else {
-		c.IPAMMultiPoolMap = m
+		c.IPAMAutoCreateCiliumPodIPPools = m
 	}
 }
 
 // Config represents the operator configuration.
 var Config = &OperatorConfig{
-	IPAMSubnetsIDs:           make([]string, 0),
-	IPAMSubnetsTags:          make(map[string]string),
-	IPAMInstanceTags:         make(map[string]string),
-	IPAMMultiPoolMap:         make(map[string]string),
-	AWSInstanceLimitMapping:  make(map[string]string),
-	ENITags:                  make(map[string]string),
-	ENIGarbageCollectionTags: make(map[string]string),
+	IPAMSubnetsIDs:                 make([]string, 0),
+	IPAMSubnetsTags:                make(map[string]string),
+	IPAMInstanceTags:               make(map[string]string),
+	IPAMAutoCreateCiliumPodIPPools: make(map[string]string),
+	AWSInstanceLimitMapping:        make(map[string]string),
+	ENITags:                        make(map[string]string),
+	ENIGarbageCollectionTags:       make(map[string]string),
 }

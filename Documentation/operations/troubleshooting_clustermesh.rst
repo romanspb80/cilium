@@ -42,19 +42,21 @@ Manual Verification of Setup
         level=info msg="Initial etcd session established" config=/var/lib/cilium/etcd-config.yaml endpoints="[https://127.0.0.1:2379]" subsys=kvstore
         level=info msg="Successfully verified version of etcd endpoint" config=/var/lib/cilium/etcd-config.yaml endpoints="[https://127.0.0.1:2379]" etcdEndpoint="https://127.0.0.1:2379" subsys=kvstore version=3.4.13
 
- #. Validate that the ClusterMesh is healthy with ``cilium status``::
+ #. Validate that ClusterMesh is healthy running ``cilium status --all-clusters`` inside each Cilium agent::
 
         ClusterMesh:   1/1 clusters ready, 10 global-services
-           k8s-c2: ready, 3 nodes, 8 identities, 10 services, 0 failures (last: never)
-           └  etcd: 1/1 connected, lease-ID=7c028201b53de660, lock lease-ID=7c028201b53de662, has-quorum=true: https://k8s-c2.mesh.cilium.io:2379 - 3.4.13 (Leader)
+           k8s-c2: ready, 3 nodes, 25 endpoints, 8 identities, 10 services, 0 failures (last: never)
+           └  etcd: 1/1 connected, leases=0, lock lease-ID=7c028201b53de662, has-quorum=true: https://k8s-c2.mesh.cilium.io:2379 - 3.5.4 (Leader)
+           └  remote configuration: expected=true, retrieved=true, cluster-id=3, kvstoremesh=false, sync-canaries=true
+           └  synchronization status: nodes=true, endpoints=true, identities=true, services=true
 
  #. Validate that required TLS secrets are setup properly. By default, the below
     TLS secrets must be available in cilium installed namespace
 
-    * clustermesh-apiserver-admin-certs, which is used by etcd container in clustermesh-apiserver deployment.
+    * clustermesh-apiserver-admin-cert, which is used by etcd container in clustermesh-apiserver deployment.
       Not applicable if external etcd cluster is used.
 
-    * clustermesh-apiserver-client-certs, which is used by apiserver container in clustermesh-apiserver deployment
+    * clustermesh-apiserver-client-cert, which is used by apiserver container in clustermesh-apiserver deployment
       to establish connection to etcd cluster (either internal or external).
 
     * cilium-ca, which is CA used to generate the above two certs.
@@ -74,7 +76,7 @@ Manual Verification of Setup
 
     If the configuration is not found, check the following:
 
-    * The Kubernetes secret ``clustermesh-secrets`` is imported correctly.
+    * The Kubernetes secret ``cilium-clustermesh`` is imported correctly.
 
     * The secret contains a file for each remote cluster with the filename
       matching the name of the remote cluster.
@@ -104,14 +106,16 @@ Manual Verification of Setup
 
     If the connection fails, check the following:
 
-    * Validate that the ``hostAliases`` section in the Cilium DaemonSet maps
+    * When KVStoreMesh is disabled, validate that the ``hostAliases`` section in the Cilium DaemonSet maps
       each remote cluster to the IP of the LoadBalancer that makes the remote
-      control plane available.
+      control plane available; When KVStoreMesh is enabled,
+      validate that the ``hostAliases`` section in the clustermesh-apiserver Deployment.
 
     * Validate that a local node in the source cluster can reach the IP
-      specified in the ``hostAliases`` section. The ``clustermesh-secrets``
+      specified in the ``hostAliases`` section. When KVStoreMesh is disabled, the ``cilium-clustermesh``
       secret contains a configuration file for each remote cluster, it will
-      point to a logical name representing the remote cluster:
+      point to a logical name representing the remote cluster;
+      When KVStoreMesh is enabled, it exists in the ``cilium-kvstoremesh`` secret.
 
     .. code-block:: yaml
 
@@ -120,8 +124,9 @@ Manual Verification of Setup
 
       The name will *NOT* be resolvable via DNS outside of the cilium pod. The
       name is mapped to an IP using ``hostAliases``. Run ``kubectl -n
-      kube-system get ds cilium -o yaml`` and grep for the FQDN to retrieve the
-      IP that is configured. Then use ``curl`` to validate that the port is
+      kube-system get daemonset cilium -o yaml`` when KVStoreMesh is disabled,
+      or run ``kubectl -n kube-system get deployment clustermesh-apiserver -o yaml`` when KVStoreMesh is enabled,
+      grep for the FQDN to retrieve the IP that is configured. Then use ``curl`` to validate that the port is
       reachable.
 
     * A firewall between the local cluster and the remote cluster may drop the
@@ -130,7 +135,7 @@ Manual Verification of Setup
 State Propagation
 -----------------
 
- #. Run ``cilium node list`` in one of the Cilium pods and validate that it
+ #. Run ``cilium-dbg node list`` in one of the Cilium pods and validate that it
     lists both local nodes and nodes from remote clusters. If this discovery
     does not work, validate the following:
 
@@ -139,7 +144,7 @@ State Propagation
 
       .. code-block:: shell-session
 
-          cilium kvstore get --recursive cilium/state/nodes/v1/
+          cilium-dbg kvstore get --recursive cilium/state/nodes/v1/
 
       .. note::
 
@@ -157,7 +162,7 @@ State Propagation
     * Make sure that the network allows the health checking traffic as
       specified in the section :ref:`firewall_requirements`.
 
- #. Validate that identities are synchronized correctly by running ``cilium
+ #. Validate that identities are synchronized correctly by running ``cilium-dbg
     identity list`` in one of the Cilium pods. It must list identities from all
     clusters. You can determine what cluster an identity belongs to by looking
     at the label ``io.cilium.k8s.policy.cluster``.
@@ -165,7 +170,7 @@ State Propagation
     If this fails:
 
     * Is the identity information available in the kvstore of each cluster? You
-      can confirm this by running ``cilium kvstore get --recursive
+      can confirm this by running ``cilium-dbg kvstore get --recursive
       cilium/state/identities/v1/``.
 
       .. note::
@@ -175,14 +180,14 @@ State Propagation
          kvstore is used for other clusters to discover all identities so it is
          important that local identities are listed.
 
- #. Validate that the IP cache is synchronized correctly by running ``cilium
-    bpf ipcache list`` or ``cilium map get cilium_ipcache``. The output must
+ #. Validate that the IP cache is synchronized correctly by running ``cilium-dbg
+    bpf ipcache list`` or ``cilium-dbg map get cilium_ipcache``. The output must
     contain pod IPs from local and remote clusters.
 
     If this fails:
 
     * Is the IP cache information available in the kvstore of each cluster? You
-      can confirm this by running ``cilium kvstore get --recursive
+      can confirm this by running ``cilium-dbg kvstore get --recursive
       cilium/state/ip/v1/``.
 
       .. note::
@@ -193,19 +198,19 @@ State Propagation
          that local identities are listed.
 
  #. When using global services, ensure that global services are configured with
-    endpoints from all clusters. Run ``cilium service list`` in any Cilium pod
+    endpoints from all clusters. Run ``cilium-dbg service list`` in any Cilium pod
     and validate that the backend IPs consist of pod IPs from all clusters
     running relevant backends. You can further validate the correct datapath
-    plumbing by running ``cilium bpf lb list`` to inspect the state of the eBPF
+    plumbing by running ``cilium-dbg bpf lb list`` to inspect the state of the eBPF
     maps.
 
     If this fails:
 
     * Are services available in the kvstore of each cluster? You can confirm
-      this by running ``cilium kvstore get --recursive
+      this by running ``cilium-dbg kvstore get --recursive
       cilium/state/services/v1/``.
 
-    * Run ``cilium debuginfo`` and look for the section ``k8s-service-cache``. In
+    * Run ``cilium-dbg debuginfo`` and look for the section ``k8s-service-cache``. In
       that section, you will find the contents of the service correlation
       cache. It will list the Kubernetes services and endpoints of the local
       cluster.  It will also have a section ``externalEndpoints`` which must
