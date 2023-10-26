@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
-package cidr
+package labels
 
 import (
 	"fmt"
@@ -12,7 +12,6 @@ import (
 
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 
-	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 )
@@ -22,54 +21,60 @@ import (
 //
 // For IPv6 addresses, it converts ":" into "-" as EndpointSelectors don't
 // support colons inside the name section of a label.
-func maskedIPToLabel(ip netip.Addr, prefix int) labels.Label {
+func maskedIPToLabel(ip netip.Addr, prefix int) Label {
 	ipStr := ip.String()
-	ipNoColons := strings.Replace(ipStr, ":", "-", -1)
 
-	// EndpointSelector keys can't start or end with a "-", so insert a
-	// zero at the start or end if it would otherwise have a "-" at that
-	// position.
-	preZero := ""
-	postZero := ""
-	if ipNoColons[0] == '-' {
-		preZero = "0"
-	}
-	if ipNoColons[len(ipNoColons)-1] == '-' {
-		postZero = "0"
-	}
 	var str strings.Builder
 	str.Grow(
-		len(preZero) +
-			len(ipNoColons) +
-			len(postZero) +
+		1 /* preZero */ +
+			len(ipStr) +
+			1 /* postZero */ +
 			2 /*len of prefix*/ +
 			1, /* '/' */
 	)
-	str.WriteString(preZero)
-	str.WriteString(ipNoColons)
-	str.WriteString(postZero)
+
+	for i := 0; i < len(ipStr); i++ {
+		if ipStr[i] == ':' {
+			// EndpointSelector keys can't start or end with a "-", so insert a
+			// zero at the start or end if it would otherwise have a "-" at that
+			// position.
+			if i == 0 {
+				str.WriteByte('0')
+				str.WriteByte('-')
+				continue
+			}
+			if i == len(ipStr)-1 {
+				str.WriteByte('-')
+				str.WriteByte('0')
+				continue
+			}
+			str.WriteByte('-')
+		} else {
+			str.WriteByte(ipStr[i])
+		}
+	}
 	str.WriteRune('/')
 	str.WriteString(strconv.Itoa(prefix))
-	return labels.Label{Key: str.String(), Source: labels.LabelSourceCIDR}
+	return Label{Key: str.String(), Source: LabelSourceCIDR}
 }
 
 // IPStringToLabel parses a string and returns it as a CIDR label.
 //
 // If ip is not a valid IP address or CIDR Prefix, returns an error.
-func IPStringToLabel(ip string) (labels.Label, error) {
+func IPStringToLabel(ip string) (Label, error) {
 	// factored out of netip.ParsePrefix to avoid allocating an empty netip.Prefix in case it's
 	// an IP and not a CIDR.
 	i := strings.LastIndexByte(ip, '/')
 	if i < 0 {
 		parsedIP, err := netip.ParseAddr(ip)
 		if err != nil {
-			return labels.Label{}, fmt.Errorf("%q is not an IP address: %w", ip, err)
+			return Label{}, fmt.Errorf("%q is not an IP address: %w", ip, err)
 		}
 		return maskedIPToLabel(parsedIP, parsedIP.BitLen()), nil
 	} else {
 		parsedPrefix, err := netip.ParsePrefix(ip)
 		if err != nil {
-			return labels.Label{}, fmt.Errorf("%q is not a CIDR: %w", ip, err)
+			return Label{}, fmt.Errorf("%q is not a CIDR: %w", ip, err)
 		}
 		return maskedIPToLabel(parsedPrefix.Masked().Addr(), parsedPrefix.Bits()), nil
 	}
@@ -84,15 +89,15 @@ func IPStringToLabel(ip string) (labels.Label, error) {
 //	"cidr:0.0.0.0/2",  "cidr:0.0.0.0/1",  "cidr:0.0.0.0/0"
 //
 // The identity reserved:world is always added as it includes any CIDR.
-func GetCIDRLabels(prefix netip.Prefix) labels.Labels {
+func GetCIDRLabels(prefix netip.Prefix) Labels {
 	once.Do(func() {
 		// simplelru.NewLRU fails only when given a negative size, so we can skip the error check
-		cidrLabelsCache, _ = simplelru.NewLRU[netip.Prefix, []labels.Label](cidrLabelsCacheMaxSize, nil)
+		cidrLabelsCache, _ = simplelru.NewLRU[netip.Prefix, []Label](cidrLabelsCacheMaxSize, nil)
 	})
 
 	addr := prefix.Addr()
 	ones := prefix.Bits()
-	lbls := make(labels.Labels, 1 /* this CIDR */ +ones /* the prefixes */ +1 /*world label*/)
+	lbls := make(Labels, 1 /* this CIDR */ +ones /* the prefixes */ +1 /*world label*/)
 
 	// If ones is zero, then it's the default CIDR prefix /0 which should
 	// just be regarded as reserved:world. In all other cases, we need
@@ -123,7 +128,7 @@ var (
 	// Stored in a lru map to limit memory usage.
 	//
 	// Stores e.g. for prefix "10.0.0.0/8" the labels ["10.0.0.0/8", ..., "0.0.0.0/0"].
-	cidrLabelsCache *simplelru.LRU[netip.Prefix, []labels.Label]
+	cidrLabelsCache *simplelru.LRU[netip.Prefix, []Label]
 
 	// mutex to serialize concurrent accesses to the cidrLabelsCache.
 	mu lock.Mutex
@@ -131,7 +136,7 @@ var (
 
 const cidrLabelsCacheMaxSize = 16384
 
-func addWorldLabel(addr netip.Addr, lbls labels.Labels) {
+func addWorldLabel(addr netip.Addr, lbls Labels) {
 	switch {
 	case !option.Config.IsDualStack():
 		lbls[worldLabelNonDualStack.Key] = worldLabelNonDualStack
@@ -145,12 +150,12 @@ func addWorldLabel(addr netip.Addr, lbls labels.Labels) {
 var (
 	once sync.Once
 
-	worldLabelNonDualStack = labels.Label{Key: labels.IDNameWorld, Source: labels.LabelSourceReserved}
-	worldLabelV4           = labels.Label{Source: labels.LabelSourceReserved, Key: labels.IDNameWorldIPv4}
-	worldLabelV6           = labels.Label{Source: labels.LabelSourceReserved, Key: labels.IDNameWorldIPv6}
+	worldLabelNonDualStack = Label{Key: IDNameWorld, Source: LabelSourceReserved}
+	worldLabelV4           = Label{Source: LabelSourceReserved, Key: IDNameWorldIPv4}
+	worldLabelV6           = Label{Source: LabelSourceReserved, Key: IDNameWorldIPv6}
 )
 
-func computeCIDRLabels(cache *simplelru.LRU[netip.Prefix, []labels.Label], lbls labels.Labels, results []labels.Label, addr netip.Addr, ones, i int) []labels.Label {
+func computeCIDRLabels(cache *simplelru.LRU[netip.Prefix, []Label], lbls Labels, results []Label, addr netip.Addr, ones, i int) []Label {
 	if i > ones {
 		return results
 	}
@@ -189,4 +194,34 @@ func computeCIDRLabels(cache *simplelru.LRU[netip.Prefix, []labels.Label], lbls 
 	mu.Unlock()
 
 	return results
+}
+
+// leafCIDRList is a map of CIDR to data, where only leaf CIDRs are present
+// in the map.
+type leafCIDRList[T any] map[netip.Prefix]T
+
+// insert conditionally adds a prefix to the leaf cidr list,
+// adding it only if the prefix is a leaf. Additionally, it removes
+// any now non-leaf cidr.
+func (ll leafCIDRList[T]) insert(newPrefix netip.Prefix, v T) {
+	// Check every existing leaf CIDR. Three possible cases:
+	// - an existing prefix contains this one: delete existing, add new
+	// - this new prefix contains an existing one: drop new prefix
+	// - no matches: add new
+	for existingPrefix := range ll {
+		// Is this a subset of an existing prefix? That means we've found a now non-leaf
+		// prefix -- swap it
+		if existingPrefix.Contains(newPrefix.Addr()) && existingPrefix.Bits() < newPrefix.Bits() {
+			delete(ll, existingPrefix)
+			// it is safe to stop here, since at most one prefix in the list could
+			// have contained this prefix.
+			break
+		}
+
+		// Is this a superset of an existing prefix? Then we're not a leaf; skip it
+		if newPrefix.Contains(existingPrefix.Addr()) && newPrefix.Bits() <= existingPrefix.Bits() {
+			return
+		}
+	}
+	ll[newPrefix] = v
 }
