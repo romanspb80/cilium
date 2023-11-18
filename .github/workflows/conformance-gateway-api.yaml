@@ -57,13 +57,13 @@ concurrency:
 
 env:
   # renovate: datasource=github-releases depName=cilium/cilium-cli
-  cilium_cli_version: v0.15.11
+  cilium_cli_version: v0.15.13
   cilium_cli_ci_version:
   CILIUM_CLI_MODE: helm
   # renovate: datasource=github-releases depName=kubernetes-sigs/kind
   kind_version: v0.20.0
   kind_config: .github/kind-config.yaml
-  gateway_api_version: v1.0.0-rc1
+  gateway_api_version: v1.0.0
   metallb_version: 0.12.1
   timeout: 5m
 
@@ -102,7 +102,7 @@ jobs:
         uses: ./.github/actions/set-env-variables
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@951eb9108277f4ffeb86d047bd492b6b96a52542 # v0.15.11
+        uses: cilium/cilium-cli@6361bfd0c291800e6c1041ea3c6ed6d178242e6a # v0.15.13
         with:
           release-version: ${{ env.cilium_cli_version }}
           ci-version: ${{ env.cilium_cli_ci_version }}
@@ -118,9 +118,9 @@ jobs:
         run: |
           echo sha=${{ steps.default_vars.outputs.sha }} >> $GITHUB_OUTPUT
           
-          SUPPORTED_FEATURES="ReferenceGrant,HTTPRoute,TLSRoute,HTTPRouteQueryParamMatching,HTTPRouteMethodMatching,GatewayClassObservedGenerationBump,HTTPRouteHostRewrite,HTTPRoutePathRewrite,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRoutePortRedirect,HTTPRouteRequestMirror"
-          if [ ${{ matrix.crd-channel }} == "experimental" ]; then
-            SUPPORTED_FEATURES+=",HTTPResponseHeaderModification,RouteDestinationPortMatching"
+          EXEMPT_FEATURES="GatewayPort8080,GatewayStaticAddresses,Mesh"
+          if [ ${{ matrix.crd-channel }} == "standard" ]; then
+            EXEMPT_FEATURES+=",HTTPRouteDestinationPortMatching,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout"
           fi
 
           CILIUM_INSTALL_DEFAULTS="${{ steps.default_vars.outputs.cilium_install_defaults }} \
@@ -130,7 +130,7 @@ jobs:
 
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
           echo skipped_tests=${SKIPPED_TESTS} >> $GITHUB_OUTPUT
-          echo supported_features=${SUPPORTED_FEATURES} >> $GITHUB_OUTPUT
+          echo exempt-features=${EXEMPT_FEATURES} >> $GITHUB_OUTPUT
 
       # Warning: since this is a privileged workflow, subsequent workflow job
       # steps must take care not to execute untrusted code.
@@ -150,7 +150,7 @@ jobs:
         uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe # v4.1.0
         with:
           # renovate: datasource=golang-version depName=go
-          go-version: 1.21.3
+          go-version: 1.21.4
 
       - name: Wait for images to be available
         timeout-minutes: 30
@@ -169,12 +169,14 @@ jobs:
           kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/${{ env.gateway_api_version }}/config/crd/${{ matrix.crd-channel }}/gateway.networking.k8s.io_referencegrants.yaml
           ## TLSRoute is only available in experimental channel in v0.7.0
           kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/${{ env.gateway_api_version }}/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/${{ env.gateway_api_version }}/config/crd/experimental/gateway.networking.k8s.io_grpcroutes.yaml
 
           # To make sure that Gateway API CRs are available
           kubectl wait --for condition=Established crd/gatewayclasses.gateway.networking.k8s.io --timeout=${{ env.timeout }}
           kubectl wait --for condition=Established crd/gateways.gateway.networking.k8s.io --timeout=${{ env.timeout }}
           kubectl wait --for condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=${{ env.timeout }}
           kubectl wait --for condition=Established crd/tlsroutes.gateway.networking.k8s.io --timeout=${{ env.timeout }}
+          kubectl wait --for condition=Established crd/grpcroutes.gateway.networking.k8s.io --timeout=${{ env.timeout }}
           kubectl wait --for condition=Established crd/referencegrants.gateway.networking.k8s.io --timeout=${{ env.timeout }}
 
       - name: Install Cilium
@@ -213,24 +215,34 @@ jobs:
             --values metallb_values.yaml \
             --wait
 
+      - name: Run simple Gateway API GRPCRoute test (temporary till upstream conformance tests)
+        timeout-minutes: 10
+        run: |
+          kubectl apply -f examples/kubernetes/gateway/grpc-route.yaml
+          # Install grpcurl binary
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+          
+          # Wait for the deployment
+          kubectl wait --for=condition=Available --all deployment --timeout=${{ env.timeout }}
+          lb=$(kubectl get services cilium-gateway-grpc -o json | jq '.status.loadBalancer.ingress[0].ip' | jq -r .)
+          grpcurl -plaintext -authority=my-grpc-service.foo.com $lb:80 yages.Echo/Ping
+          curl -s -v --fail $lb/yages.Echo/Ping \
+            -XPOST \
+            -H 'Host: my-grpc-service.foo.com' \
+            -H 'Content-Type: application/grpc-web-text' \
+            -H 'Accept: application/grpc-web-text' \
+            -d'AAAAAAA='
+
       - name: Run Gateway API conformance test
         timeout-minutes: 30
         run: |
-          cat << EOF | kubectl apply -f -
-          apiVersion: gateway.networking.k8s.io/v1
-          kind: GatewayClass
-          metadata:
-            name: cilium
-          spec:
-            controllerName: io.cilium/gateway-controller
-          EOF
-          
           if [ ${{ matrix.conformance-profile }} == "true" ]; then
             GATEWAY_API_CONFORMANCE_TESTS=1 go test \
               -p 4 \
               -v ./operator/pkg/gateway-api \
               --gateway-class cilium \
-              --supported-features "${{ steps.vars.outputs.supported_features }}" \
+              --all-features \
+              --exempt-features "${{ steps.vars.outputs.exempt-features }}" \
               --conformance-profiles HTTP,TLS \
               --organization cilium \
               --project cilium \
@@ -245,7 +257,8 @@ jobs:
               -p 4 \
               -v ./operator/pkg/gateway-api \
               --gateway-class cilium \
-              --supported-features "${{ steps.vars.outputs.supported_features }}" \
+              --all-features \
+              --exempt-features "${{ steps.vars.outputs.exempt-features }}" \
               -test.run "TestConformance" \
               -test.skip "${{ steps.vars.outputs.skipped_tests }}"
           fi

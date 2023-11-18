@@ -19,6 +19,9 @@ const (
 	// RouteTableVtep is the default table ID to use for VTEP routing rules
 	RouteTableVtep = 202
 
+	// RouteTableProxy is the default table ID to use for proxy routing rules.
+	RouteTableProxy = 2004
+
 	// RouteTableInterfacesOffset is the offset for the per-ENI routing tables.
 	// Each ENI interface will have its own table starting with this offset. It
 	// is 10 because it is highly unlikely to collide with the main routing
@@ -122,4 +125,8 @@ const (
 
 	// IPsecFwdPriority is the priority of the fwd rules placed by IPsec
 	IPsecFwdPriority = 0x0B9F
+
+	// IPsecXFRMMarkSPIShift defines how many bits the SPI is shifted when
+	// encoded in a XfrmMark
+	IPsecXFRMMarkSPIShift = 12
 )

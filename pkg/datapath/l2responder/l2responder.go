@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/netip"
 	"runtime/pprof"
-	"time"
 
 	"github.com/cilium/cilium/pkg/datapath/garp"
 	"github.com/cilium/cilium/pkg/datapath/tables"
@@ -19,6 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/hive/job"
 	"github.com/cilium/cilium/pkg/maps/l2respondermap"
 	"github.com/cilium/cilium/pkg/statedb"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/types"
 
 	"github.com/sirupsen/logrus"
@@ -32,6 +32,15 @@ import (
 var Cell = cell.Module(
 	"l2-responder",
 	"L2 Responder Reconciler",
+
+	// Provide and register the Table[*L2AnnounceEntry] containing the
+	// desired state.
+	cell.Provide(
+		tables.NewL2AnnounceTable,
+		statedb.RWTable[*tables.L2AnnounceEntry].ToTable,
+	),
+	cell.Invoke(statedb.RegisterTable[*tables.L2AnnounceEntry]),
+
 	cell.Invoke(NewL2ResponderReconciler),
 	cell.Provide(newNeighborNetlink),
 )

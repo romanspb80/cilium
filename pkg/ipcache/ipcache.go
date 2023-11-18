@@ -8,12 +8,12 @@ import (
 	"net"
 	"net/netip"
 	"sync/atomic"
-	"time"
 
 	"github.com/sirupsen/logrus"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/counter"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
@@ -24,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/types"
 )
 
@@ -127,6 +128,10 @@ type IPCache struct {
 	// references to identities and removing the corresponding IPCache
 	// entries if unused.
 	deferredPrefixRelease *asyncPrefixReleaser
+
+	// prefixLengths tracks the unique set of prefix lengths for IPv4 and
+	// IPv6 addresses in order to optimize longest prefix match lookups.
+	prefixLengths *counter.PrefixLengthCounter
 }
 
 // NewIPCache returns a new IPCache with the mappings of endpoint IP to security
@@ -141,6 +146,7 @@ func NewIPCache(c *Configuration) *IPCache {
 		controllers:       controller.NewManager(),
 		namedPorts:        types.NewNamedPortMultiMap(),
 		metadata:          newMetadata(),
+		prefixLengths:     counter.DefaultPrefixLengthCounter(),
 		Configuration:     c,
 	}
 	ipc.deferredPrefixRelease = newAsyncPrefixReleaser(c.Context, ipc, 1*time.Millisecond)
@@ -229,10 +235,13 @@ func (ipc *IPCache) getHostIPCache(ip string) (net.IP, uint8) {
 
 // GetK8sMetadata returns Kubernetes metadata for the given IP address.
 // The returned pointer should *never* be modified.
-func (ipc *IPCache) GetK8sMetadata(ip string) *K8sMetadata {
+func (ipc *IPCache) GetK8sMetadata(ip netip.Addr) *K8sMetadata {
+	if !ip.IsValid() {
+		return nil
+	}
 	ipc.mutex.RLock()
 	defer ipc.mutex.RUnlock()
-	return ipc.getK8sMetadata(ip)
+	return ipc.getK8sMetadata(ip.String())
 }
 
 // getK8sMetadata returns Kubernetes metadata for the given IP address.
@@ -408,6 +417,7 @@ func (ipc *IPCache) upsertLocked(
 		ipc.identityToIPCache[newIdentity.ID] = map[string]struct{}{}
 	}
 	ipc.identityToIPCache[newIdentity.ID][ip] = struct{}{}
+	ipc.prefixLengths.Add([]netip.Prefix{cidrCluster.AsPrefix()})
 
 	if hostIP == nil {
 		delete(ipc.ipToHostIPCache, ip)
@@ -447,24 +457,61 @@ func (ipc *IPCache) DumpToListener(listener IPIdentityMappingListener) {
 	ipc.RUnlock()
 }
 
+// MU is a batched metadata update, the short name is to cut down on visual clutter.
+type MU struct {
+	Prefix   netip.Prefix
+	Source   source.Source
+	Resource ipcacheTypes.ResourceID
+	Metadata []IPMetadata
+}
+
 // UpsertMetadata upserts a given IP and some corresponding information into
 // the ipcache metadata map. See IPMetadata for a list of types that are valid
 // to pass into this function. This will trigger asynchronous calculation of
 // any datapath updates necessary to implement the logic associated with the
 // specified metadata.
 func (ipc *IPCache) UpsertMetadata(prefix netip.Prefix, src source.Source, resource ipcacheTypes.ResourceID, aux ...IPMetadata) {
+	ipc.UpsertMetadataBatch(MU{Prefix: prefix, Source: src, Resource: resource, Metadata: aux})
+}
+
+// UpsertMetadataBatch applies updates to multiple prefixes in a single transaction,
+// reducing potential lock contention.
+func (ipc *IPCache) UpsertMetadataBatch(updates ...MU) {
+	prefixes := make([]netip.Prefix, 0, len(updates))
 	ipc.metadata.Lock()
-	ipc.metadata.upsertLocked(prefix, src, resource, aux...)
+	for _, upd := range updates {
+		ipc.metadata.upsertLocked(upd.Prefix, upd.Source, upd.Resource, upd.Metadata...)
+		prefixes = append(prefixes, upd.Prefix)
+	}
 	ipc.metadata.Unlock()
-	ipc.metadata.enqueuePrefixUpdates(prefix)
+	ipc.metadata.enqueuePrefixUpdates(prefixes...)
 	ipc.TriggerLabelInjection()
 }
 
+// RemoveMetadata removes metadata associated with a specific resource from the
+// supplied prefix. Individual metadata types must be supplied for removal, but the
+// data need not match.
+//
+// This removes nothing:
+//
+//	RemoveMedata(pfx, resource)
+//
+// This removes all labels from the given resource:
+//
+//	RemoveMetadata(pfx, resource, Labels{})
 func (ipc *IPCache) RemoveMetadata(prefix netip.Prefix, resource ipcacheTypes.ResourceID, aux ...IPMetadata) {
+	ipc.RemoveMetadataBatch(MU{Prefix: prefix, Resource: resource, Metadata: aux})
+}
+
+func (ipc *IPCache) RemoveMetadataBatch(updates ...MU) {
+	prefixes := make([]netip.Prefix, 0, len(updates))
 	ipc.metadata.Lock()
-	ipc.metadata.remove(prefix, resource, aux...)
+	for _, upd := range updates {
+		ipc.metadata.remove(upd.Prefix, upd.Resource, upd.Metadata...)
+		prefixes = append(prefixes, upd.Prefix)
+	}
 	ipc.metadata.Unlock()
-	ipc.metadata.enqueuePrefixUpdates(prefix)
+	ipc.metadata.enqueuePrefixUpdates(prefixes...)
 	ipc.TriggerLabelInjection()
 }
 
@@ -478,9 +525,9 @@ func (ipc *IPCache) UpsertPrefixes(prefixes []netip.Prefix, src source.Source, r
 	ipc.metadata.Lock()
 	for _, p := range prefixes {
 		ipc.metadata.upsertLocked(p, src, resource, labels.GetCIDRLabels(p))
-		ipc.metadata.enqueuePrefixUpdates(p)
 	}
 	ipc.metadata.Unlock()
+	ipc.metadata.enqueuePrefixUpdates(prefixes...)
 	ipc.TriggerLabelInjection()
 }
 
@@ -499,9 +546,9 @@ func (ipc *IPCache) RemovePrefixes(prefixes []netip.Prefix, src source.Source, r
 	ipc.metadata.Lock()
 	for _, p := range prefixes {
 		ipc.metadata.remove(p, resource, labels.GetCIDRLabels(p))
-		ipc.metadata.enqueuePrefixUpdates(p)
 	}
 	ipc.metadata.Unlock()
+	ipc.metadata.enqueuePrefixUpdates(prefixes...)
 	ipc.TriggerLabelInjection()
 }
 
@@ -651,6 +698,7 @@ func (ipc *IPCache) deleteLocked(ip string, source source.Source) (namedPortsCha
 	}
 	delete(ipc.ipToHostIPCache, ip)
 	delete(ipc.ipToK8sMetadata, ip)
+	ipc.prefixLengths.Delete([]netip.Prefix{cidrCluster.AsPrefix()})
 
 	// Update named ports
 	namedPortsChanged = false
@@ -756,6 +804,39 @@ func (ipc *IPCache) LookupByPrefix(IP string) (Identity, bool) {
 	ipc.mutex.RLock()
 	defer ipc.mutex.RUnlock()
 	return ipc.LookupByPrefixRLocked(IP)
+}
+
+// LookupSecIDByIP performs a longest prefix match lookup in the IPCache for
+// the identity corresponding to the specified address (or, in the case of no
+// direct match, any shorter prefix). Returns the corresponding identity and
+// whether a match was found.
+func (ipc *IPCache) LookupSecIDByIP(ip netip.Addr) (id Identity, ok bool) {
+	if !ip.IsValid() {
+		return Identity{}, false
+	}
+
+	ipc.mutex.RLock()
+	defer ipc.mutex.RUnlock()
+
+	if id, ok = ipc.LookupByIPRLocked(ip.String()); ok {
+		return id, ok
+	}
+
+	ipv6Prefixes, ipv4Prefixes := ipc.prefixLengths.ToBPFData()
+	prefixes := ipv4Prefixes
+	if ip.Is6() {
+		prefixes = ipv6Prefixes
+	}
+	for _, prefixLen := range prefixes {
+		// note: we perform a lookup even when `prefixLen == bits`, as some
+		// entries derived by a single address cidr-range will not have been
+		// found by the above lookup
+		cidr, _ := ip.Prefix(prefixLen)
+		if id, ok = ipc.LookupByPrefixRLocked(cidr.String()); ok {
+			return id, ok
+		}
+	}
+	return id, false
 }
 
 // LookupByIdentity returns the set of IPs (endpoint or CIDR prefix) that have

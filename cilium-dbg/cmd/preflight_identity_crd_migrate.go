@@ -132,7 +132,7 @@ func migrateIdentities(ctx hive.HookContext, clientset k8sClient.Clientset, reso
 		})
 
 		ctx, cancel := context.WithTimeout(ctx, opTimeout)
-		err := crdBackend.AllocateID(ctx, id, key)
+		_, err := crdBackend.AllocateID(ctx, id, key)
 		switch {
 		case err != nil && k8serrors.IsAlreadyExists(err):
 			alreadyAllocatedKeys[id] = key
@@ -230,8 +230,8 @@ func initK8s(ctx context.Context, clientset k8sClient.Clientset, resources agent
 	//
 	// FIXME: add options to handle clustermesh with this constructor parameter:
 	//    allocator.WithPrefixMask(idpool.ID(option.Config.ClusterID<<identity.ClusterIDShift)))
-	minID := idpool.ID(identity.MinimalAllocationIdentity)
-	maxID := idpool.ID(identity.MaximumAllocationIdentity)
+	minID := idpool.ID(identity.GetMinimalAllocationIdentity())
+	maxID := idpool.ID(identity.GetMaximumAllocationIdentity())
 	crdAllocator, err = allocator.NewAllocator(&cacheKey.GlobalIdentity{}, crdBackend,
 		allocator.WithMax(maxID), allocator.WithMin(minID))
 	if err != nil {

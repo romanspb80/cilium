@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/google/renameio/v2"
 	"github.com/sirupsen/logrus"
@@ -30,13 +29,13 @@ import (
 	"github.com/cilium/cilium/pkg/loadinfo"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/maps/bwmap"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/revert"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/version"
 )
 
@@ -975,8 +974,8 @@ func (e *Endpoint) deleteMaps() []error {
 	}
 
 	// Remove rate-limit from bandwidth manager map.
-	if e.bps != 0 && option.Config.EnableBandwidthManager {
-		if err := bwmap.Delete(e.ID); err != nil {
+	if e.bps != 0 {
+		if err := e.owner.Datapath().BandwidthManager().DeleteEndpointBandwidthLimit(e.ID); err != nil {
 			errors = append(errors, fmt.Errorf("unable to remote endpoint from bandwidth manager map: %s", err))
 		}
 	}
@@ -1043,14 +1042,21 @@ func (e *Endpoint) SkipStateClean() {
 
 // PolicyMapPressureEvent represents an event for a policymap pressure metric
 // update that is sent via the policyMapPressureUpdater interface.
-type PolicyMapPressureEvent struct{ Value float64 }
+type PolicyMapPressureEvent struct {
+	Value      float64
+	EndpointID uint16
+}
 type policyMapPressureUpdater interface {
 	Update(PolicyMapPressureEvent)
+	Remove(uint16)
 }
 
 func (e *Endpoint) updatePolicyMapPressureMetric() {
 	value := float64(e.realizedPolicy.GetPolicyMap().Len()) / float64(e.policyMap.MaxEntries())
-	e.PolicyMapPressureUpdater.Update(PolicyMapPressureEvent{value})
+	e.PolicyMapPressureUpdater.Update(PolicyMapPressureEvent{
+		Value:      value,
+		EndpointID: e.ID,
+	})
 }
 
 func (e *Endpoint) deletePolicyKey(keyToDelete policy.Key, incremental bool) bool {
@@ -1398,8 +1404,9 @@ func (e *Endpoint) startSyncPolicyMapController() {
 	e.controllers.CreateController(ctrlName,
 		controller.ControllerParams{
 			Group:          syncPolicymapControllerGroup,
-			HealthReporter: e.GetReporter("policy map sync"),
+			HealthReporter: e.GetReporter("policymap-sync"),
 			DoFunc: func(ctx context.Context) error {
+				// Failure to lock is not an error, it means
 				// that the endpoint was disconnected and we
 				// should exit gracefully.
 				if err := e.lockAlive(); err != nil {

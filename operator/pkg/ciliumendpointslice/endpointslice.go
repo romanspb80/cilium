@@ -66,13 +66,10 @@ func (c *Controller) initializeQueue() {
 		logfields.WorkQueueSyncBackOff: defaultSyncBackOff,
 	}).Info("CES controller workqueue configuration")
 
-	c.queue = workqueue.NewNamedRateLimitingQueue(workqueue.NewMaxOfRateLimiter(
+	c.queue = workqueue.NewRateLimitingQueueWithConfig(
 		workqueue.NewItemExponentialFailureRateLimiter(defaultSyncBackOff, maxSyncBackOff),
-		// 10 qps, 100 bucket size. This is only for retry speed and its
-		// only the overall factor (not per item).
-		&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(c.writeQPSLimit), c.writeQPSBurst)},
-	), "cilium_endpoint_slice")
-	c.queueTerminated = make(chan struct{})
+		workqueue.RateLimitingQueueConfig{Name: "cilium_endpoint_slice"})
+	c.queueRateLimiter = rate.NewLimiter(rate.Limit(c.writeQPSLimit), c.writeQPSBurst)
 }
 
 func (c *Controller) onEndpointUpdate(cep *cilium_api_v2.CiliumEndpoint) {
@@ -158,14 +155,9 @@ func (c *Controller) Start(ctx hive.HookContext) error {
 
 func (c *Controller) Stop(ctx hive.HookContext) error {
 	c.wp.Close()
-	c.stopQueueAndWait()
+	c.queue.ShutDown()
 	c.contextCancel()
 	return nil
-}
-
-func (c *Controller) stopQueueAndWait() {
-	c.queue.ShutDown()
-	<-c.queueTerminated
 }
 
 func (c *Controller) runCiliumEndpointsUpdater(ctx context.Context) error {
@@ -177,7 +169,7 @@ func (c *Controller) runCiliumEndpointsUpdater(ctx context.Context) error {
 			c.onEndpointUpdate(event.Object)
 		case resource.Delete:
 			c.logger.WithFields(logrus.Fields{
-				logfields.CEPName: event.Key.String()}).Debug("Got Upsert Endpoint event")
+				logfields.CEPName: event.Key.String()}).Debug("Got Delete Endpoint event")
 			c.onEndpointDelete(event.Object)
 		}
 		event.Done(nil)
@@ -190,11 +182,11 @@ func (c *Controller) runCiliumEndpointSliceUpdater(ctx context.Context) error {
 		switch event.Kind {
 		case resource.Upsert:
 			c.logger.WithFields(logrus.Fields{
-				logfields.CESName: event.Key.String()}).Debug("Got Upsert Endpoint event")
+				logfields.CESName: event.Key.String()}).Debug("Got Upsert Endpoint Slice event")
 			c.onSliceUpdate(event.Object)
 		case resource.Delete:
 			c.logger.WithFields(logrus.Fields{
-				logfields.CESName: event.Key.String()}).Debug("Got Upsert Endpoint event")
+				logfields.CESName: event.Key.String()}).Debug("Got Delete Endpoint Slice event")
 			c.onSliceDelete(event.Object)
 		}
 		event.Done(nil)
@@ -223,12 +215,20 @@ func (c *Controller) syncCESsInLocalCache(ctx context.Context) error {
 // worker runs a worker thread that just dequeues items, processes them, and
 // marks them done.
 func (c *Controller) worker() {
-	defer close(c.queueTerminated)
 	for c.processNextWorkItem() {
 	}
 }
 
+func (c *Controller) rateLimitProcessing() {
+	delay := c.queueRateLimiter.Reserve().Delay()
+	select {
+	case <-c.context.Done():
+	case <-time.After(delay):
+	}
+}
+
 func (c *Controller) processNextWorkItem() bool {
+	c.rateLimitProcessing()
 	cKey, quit := c.queue.Get()
 	if quit {
 		return false

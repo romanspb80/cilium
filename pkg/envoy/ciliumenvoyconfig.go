@@ -6,7 +6,6 @@ package envoy
 import (
 	"context"
 	"fmt"
-	"time"
 
 	cilium "github.com/cilium/proxy/go/cilium/api"
 	envoy_config_cluster "github.com/cilium/proxy/go/envoy/config/cluster/v3"
@@ -27,6 +26,7 @@ import (
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 const anyPort = "*"
@@ -90,8 +90,12 @@ func qualifyRouteConfigurationResourceNames(namespace, name string, routeConfig 
 		for _, rt := range vhost.Routes {
 			if action := rt.GetRoute(); action != nil {
 				if clusterName := action.GetCluster(); clusterName != "" {
-					action.GetClusterSpecifier().(*envoy_config_route.RouteAction_Cluster).Cluster =
-						api.ResourceQualifiedName(namespace, name, clusterName)
+					action.GetClusterSpecifier().(*envoy_config_route.RouteAction_Cluster).Cluster = api.ResourceQualifiedName(namespace, name, clusterName)
+				}
+				for _, r := range action.GetRequestMirrorPolicies() {
+					if clusterName := r.GetCluster(); clusterName != "" {
+						r.Cluster = api.ResourceQualifiedName(namespace, name, clusterName)
+					}
 				}
 				if weightedClusters := action.GetWeightedClusters(); weightedClusters != nil {
 					for _, cluster := range weightedClusters.GetClusters() {
@@ -141,8 +145,14 @@ func ParseResources(cecNamespace string, cecName string, anySlice []cilium_v2.XD
 				listener.EnableReusePort = &wrapperspb.BoolValue{Value: false}
 			}
 
+			// Figure out if this is an internal listener
+			isInternalListener := listener.GetInternalListener() != nil
+
+			// Only inject Cilium filters if Cilium allocates listener address
+			injectCiliumFilters := listener.GetAddress() == nil && !isInternalListener
+
 			// Inject Cilium bpf metadata listener filter, if not already present.
-			{
+			if !isInternalListener {
 				found := false
 				for _, lf := range listener.ListenerFilters {
 					if lf.Name == "cilium.bpf_metadata" {
@@ -193,7 +203,7 @@ func ParseResources(cecNamespace string, cecName string, anySlice []cilium_v2.XD
 						if routeConfig := hcmConfig.GetRouteConfig(); routeConfig != nil {
 							qualifyRouteConfigurationResourceNames(cecNamespace, cecName, routeConfig)
 						}
-						if listener.GetAddress() == nil {
+						if injectCiliumFilters {
 							foundCiliumL7Filter := false
 						loop:
 							for j, httpFilter := range hcmConfig.HttpFilters {
@@ -221,17 +231,32 @@ func ParseResources(cecNamespace string, cecName string, anySlice []cilium_v2.XD
 						if err != nil {
 							continue
 						}
-						_, ok := any.(*envoy_config_tcp.TcpProxy)
+						tcpProxy, ok := any.(*envoy_config_tcp.TcpProxy)
 						if !ok {
 							continue
+						}
+
+						updated := false
+						switch c := tcpProxy.GetClusterSpecifier().(type) {
+						case *envoy_config_tcp.TcpProxy_Cluster:
+							c.Cluster = api.ResourceQualifiedName(cecNamespace, cecName, c.Cluster)
+							updated = true
+						case *envoy_config_tcp.TcpProxy_WeightedClusters:
+							for _, wc := range c.WeightedClusters.Clusters {
+								wc.Name = api.ResourceQualifiedName(cecNamespace, cecName, wc.Name)
+							}
+							updated = true
+						}
+
+						if updated {
+							filter.ConfigType = &envoy_config_listener.Filter_TypedConfig{
+								TypedConfig: toAny(tcpProxy),
+							}
 						}
 					default:
 						continue
 					}
-					// Only inject Cilium policy enforcement filters for
-					// listeners for which Cilium agent allocates address
-					// for (see below)
-					if listener.GetAddress() == nil {
+					if injectCiliumFilters {
 						if !foundCiliumNetworkFilter {
 							// Inject Cilium network filter just before the HTTP Connection Manager or TCPProxy filter
 							fc.Filters = append(fc.Filters[:i+1], fc.Filters[i:]...)
@@ -393,7 +418,10 @@ func ParseResources(cecNamespace string, cecName string, anySlice []cilium_v2.XD
 	// Allocate TPROXY ports for listeners without address.
 	// Do this only after all other possible error cases.
 	for _, listener := range resources.Listeners {
-		if listener.GetAddress() == nil {
+		// Figure out if this is an internal listener
+		isInternalListener := listener.GetInternalListener() != nil
+
+		if listener.GetAddress() == nil && !isInternalListener {
 			port, err := portAllocator.AllocateProxyPort(listener.Name, false, true)
 			if err != nil || port == 0 {
 				return Resources{}, fmt.Errorf("Listener port allocation for %q failed: %s", listener.Name, err)

@@ -11,7 +11,6 @@ import (
 	"os"
 	"reflect"
 	"strings"
-	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -19,14 +18,15 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/bpf"
-	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/nat"
+	"github.com/cilium/cilium/pkg/maps/timestamp"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/tuple"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -78,10 +78,6 @@ const (
 
 	// MaxTime specifies the last possible time for GCFilter.Time
 	MaxTime = math.MaxUint32
-
-	// The BPF CT implementation stores jiffies right-shifted by this value. Must
-	// correspond to BPF_MONO_SCALER in the datapath.
-	bpfMonoScaler = 8
 
 	metricsAlive   = "alive"
 	metricsDeleted = "deleted"
@@ -187,17 +183,6 @@ type GCFilter struct {
 // EmitCTEntryCBFunc is the type used for the EmitCTEntryCB callback in GCFilter
 type EmitCTEntryCBFunc func(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, nextHdr, flags uint8, entry *CtEntry)
 
-// scaledJiffies returns the kernel's current jiffies, right-shifted by a
-// monotonic scaler value.
-func scaledJiffies() (uint64, error) {
-	j, err := probes.Jiffies()
-	if err != nil {
-		return 0, err
-	}
-
-	return j >> bpfMonoScaler, nil
-}
-
 // DumpEntriesWithTimeDiff iterates through Map m and writes the values of the
 // ct entries in m to a string. If clockSource is not nil, it uses it to
 // compute the time difference of each entry from now and prints that too.
@@ -206,32 +191,21 @@ func DumpEntriesWithTimeDiff(m CtMap, clockSource *models.ClockSource) (string, 
 
 	if clockSource == nil {
 		toRemSecs = nil
-	} else if clockSource.Mode == models.ClockSourceModeKtime {
-		now, err := bpf.GetMtime()
-		if err != nil {
-			return "", err
-		}
-		now = now / 1000000000
-		toRemSecs = func(t uint32) string {
-			diff := int64(t) - int64(now)
-			return fmt.Sprintf("remaining: %d sec(s)", diff)
-		}
-	} else if clockSource.Mode == models.ClockSourceModeJiffies {
-		now, err := scaledJiffies()
-		if err != nil {
-			return "", err
-		}
-		if clockSource.Hertz == 0 {
-			return "", fmt.Errorf("invalid clock Hertz value (0)")
-		}
-		toRemSecs = func(t uint32) string {
-			diff := int64(t) - int64(now)
-			diff = diff << 8
-			diff = diff / int64(clockSource.Hertz)
-			return fmt.Sprintf("remaining: %d sec(s)", diff)
-		}
 	} else {
-		return "", fmt.Errorf("unknown clock source: %s", clockSource.Mode)
+		now, err := timestamp.GetCTCurTime(clockSource)
+		if err != nil {
+			return "", err
+		}
+		tsConverter, err := timestamp.NewCTTimeToSecConverter(clockSource)
+		if err != nil {
+			return "", err
+		}
+		tsecNow := tsConverter(now)
+		toRemSecs = func(t uint32) string {
+			tsec := tsConverter(uint64(t))
+			diff := int64(tsec) - int64(tsecNow)
+			return fmt.Sprintf("remaining: %d sec(s)", diff)
+		}
 	}
 
 	var sb strings.Builder
@@ -280,12 +254,32 @@ func newMap(mapName string, m mapType) *Map {
 	return result
 }
 
-func purgeCtEntry6(m *Map, key CtKey, natMap *nat.Map) error {
+func purgeCtEntry6(m *Map, key CtKey, entry *CtEntry, natMap *nat.Map) error {
 	err := m.Delete(key)
-	if err == nil && natMap != nil {
-		natMap.DeleteMapping(key.GetTupleKey())
+	if err != nil || natMap == nil {
+		return err
 	}
-	return err
+
+	t := key.GetTupleKey()
+	tupleType := t.GetFlags()
+
+	if tupleType == tuple.TUPLE_F_IN && entry.isDsrEntry() {
+		// To delete NAT entries created by legacy DSR
+		nat.DeleteSwappedMapping6(natMap, t.(*tuple.TupleKey6Global))
+	}
+
+	if tupleType == tuple.TUPLE_F_OUT {
+		if entry.isDsrEntry() {
+			// To delete NAT entries created by DSR
+			nat.DeleteSwappedMapping6(natMap, t.(*tuple.TupleKey6Global))
+		} else {
+			// To delete NAT entries created for SNAT
+			nat.DeleteMapping6(natMap, t.(*tuple.TupleKey6Global))
+
+		}
+	}
+
+	return nil
 }
 
 // doGC6 iterates through a CTv6 map and drops entries based on the given
@@ -338,7 +332,7 @@ func doGC6(m *Map, filter *GCFilter) gcStats {
 
 			switch action {
 			case deleteEntry:
-				err := purgeCtEntry6(m, currentKey6Global, natMap)
+				err := purgeCtEntry6(m, currentKey6Global, entry, natMap)
 				if err != nil {
 					log.WithError(err).WithField(logfields.Key, currentKey6Global.String()).Error("Unable to delete CT entry")
 				} else {
@@ -358,7 +352,7 @@ func doGC6(m *Map, filter *GCFilter) gcStats {
 
 			switch action {
 			case deleteEntry:
-				err := purgeCtEntry6(m, currentKey6, natMap)
+				err := purgeCtEntry6(m, currentKey6, entry, natMap)
 				if err != nil {
 					log.WithError(err).WithField(logfields.Key, currentKey6.String()).Error("Unable to delete CT entry")
 				} else {
@@ -379,12 +373,31 @@ func doGC6(m *Map, filter *GCFilter) gcStats {
 	return stats
 }
 
-func purgeCtEntry4(m *Map, key CtKey, natMap *nat.Map) error {
+func purgeCtEntry4(m *Map, key CtKey, entry *CtEntry, natMap *nat.Map) error {
 	err := m.Delete(key)
-	if err == nil && natMap != nil {
-		natMap.DeleteMapping(key.GetTupleKey())
+	if err != nil || natMap == nil {
+		return err
 	}
-	return err
+
+	t := key.GetTupleKey()
+	tupleType := t.GetFlags()
+
+	if tupleType == tuple.TUPLE_F_IN && entry.isDsrEntry() {
+		// To delete NAT entries created by legacy DSR
+		nat.DeleteSwappedMapping4(natMap, t.(*tuple.TupleKey4Global))
+	}
+
+	if tupleType == tuple.TUPLE_F_OUT {
+		if entry.isDsrEntry() {
+			// To delete NAT entries created by DSR
+			nat.DeleteSwappedMapping4(natMap, t.(*tuple.TupleKey4Global))
+		} else {
+			// To delete NAT entries created for SNAT
+			nat.DeleteMapping4(natMap, t.(*tuple.TupleKey4Global))
+		}
+	}
+
+	return nil
 }
 
 // doGC4 iterates through a CTv4 map and drops entries based on the given
@@ -436,7 +449,7 @@ func doGC4(m *Map, filter *GCFilter) gcStats {
 
 			switch action {
 			case deleteEntry:
-				err := purgeCtEntry4(m, currentKey4Global, natMap)
+				err := purgeCtEntry4(m, currentKey4Global, entry, natMap)
 				if err != nil {
 					log.WithError(err).WithField(logfields.Key, currentKey4Global.String()).Error("Unable to delete CT entry")
 				} else {
@@ -456,7 +469,7 @@ func doGC4(m *Map, filter *GCFilter) gcStats {
 
 			switch action {
 			case deleteEntry:
-				err := purgeCtEntry4(m, currentKey4, natMap)
+				err := purgeCtEntry4(m, currentKey4, entry, natMap)
 				if err != nil {
 					log.WithError(err).WithField(logfields.Key, currentKey4.String()).Error("Unable to delete CT entry")
 				} else {
@@ -519,13 +532,7 @@ func doGC(m *Map, filter *GCFilter) int {
 // It returns how many items were deleted from m.
 func GC(m *Map, filter *GCFilter) int {
 	if filter.RemoveExpired {
-		var t uint64
-		if option.Config.ClockSource == option.ClockSourceKtime {
-			t, _ = bpf.GetMtime()
-			t = t / 1000000000
-		} else {
-			t, _ = scaledJiffies()
-		}
+		t, _ := timestamp.GetCTCurTime(timestamp.GetClockSourceFromOptions())
 		filter.Time = uint32(t)
 	}
 
@@ -535,8 +542,10 @@ func GC(m *Map, filter *GCFilter) int {
 // PurgeOrphanNATEntries removes orphan SNAT entries. We call an SNAT entry
 // orphan if it does not have a corresponding CT entry.
 //
-// This can happen when the CT entry is removed by the LRU eviction which
-// happens when the CT map becomes full.
+// Typically NAT entries should get removed along with their owning CT entry,
+// as part of purgeCtEntry*(). But stale NAT entries can get left behind if the
+// CT entry disappears for other reasons - for instance by LRU eviction, or
+// when the datapath re-purposes the CT entry.
 //
 // PurgeOrphanNATEntries() is triggered by the datapath via the GC signaling
 // mechanism. When the datapath SNAT fails to find free mapping after

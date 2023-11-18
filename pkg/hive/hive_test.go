@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/hive/cell"
 )
@@ -197,6 +198,40 @@ func TestHiveConfigOverride(t *testing.T) {
 	assert.Equal(t, "override", cfg.Foo, "Config.Foo not set correctly")
 }
 
+type CIDRSliceConfig struct {
+	Foo []*cidr.CIDR
+}
+
+func (CIDRSliceConfig) Flags(flags *pflag.FlagSet) {
+	flags.StringSlice("foo", nil, "foo")
+}
+
+func TestHiveCIDRSlice(t *testing.T) {
+	var cfg CIDRSliceConfig
+	testCell := cell.Module(
+		"test",
+		"Test Module",
+		cell.Config(CIDRSliceConfig{}),
+		cell.Invoke(func(c CIDRSliceConfig) {
+			cfg = c
+		}),
+	)
+	hive := hive.New(testCell)
+
+	flags := pflag.NewFlagSet("", pflag.ContinueOnError)
+	hive.RegisterFlags(flags)
+	flags.Set("foo", "1.2.3.4/24,2001:db8::/64")
+
+	err := hive.Start(context.TODO())
+	require.NoError(t, err, "expected Start to succeed")
+	err = hive.Stop(context.TODO())
+	require.NoError(t, err, "expected Stop to succeed")
+
+	require.Len(t, cfg.Foo, 2)
+	require.Equal(t, cidr.MustParseCIDR("1.2.3.4/24"), cfg.Foo[0], "Config.Foo not set correctly")
+	require.Equal(t, cidr.MustParseCIDR("2001:db8::/64"), cfg.Foo[1], "Config.Foo not set correctly")
+}
+
 type SomeObject struct {
 	X int
 }
@@ -301,16 +336,19 @@ func TestProvideHealthReporter(t *testing.T) {
 	)
 
 	assert.NoError(t, h.Run(), "expected Run to succeed")
-	s1 := chp.Get(cell.FullModuleID{"test"})
-	s2 := chp.Get(cell.FullModuleID{"test2"})
-	s3 := chp.Get(cell.FullModuleID{"unknown"})
+	s1, err := chp.Get(cell.FullModuleID{"test"})
+	assert.NoError(t, err)
+	s2, err := chp.Get(cell.FullModuleID{"test2"})
+	assert.NoError(t, err)
+	s3, err := chp.Get(cell.FullModuleID{"unknown"})
+	assert.NoError(t, err)
 	assert.Len(t, chp.All(), 3, "expected two health reports")
-	assert.Equal(t, cell.StatusOK, s1.Level)
-	assert.Equal(t, s1.FullModuleID, cell.FullModuleID{"test"})
-	assert.True(t, s1.Stopped)
-	assert.Equal(t, cell.StatusDegraded, s2.Level)
-	assert.Equal(t, s2.FullModuleID, cell.FullModuleID{"test2"})
-	assert.Equal(t, s3.Level, cell.StatusUnknown)
+	assert.Equal(t, cell.StatusOK, s1.Level())
+
+	//assert.Equal(t, s1.FullModuleID, cell.FullModuleID{"test"})
+	assert.Equal(t, cell.StatusDegraded, s2.Level())
+	//assert.Equal(t, s2.FullModuleID, cell.FullModuleID{"test2"})
+	assert.Equal(t, cell.StatusUnknown, s3.Level())
 }
 
 func TestGroup(t *testing.T) {

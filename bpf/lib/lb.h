@@ -379,9 +379,8 @@ static __always_inline int reverse_map_l4_port(struct __ctx_buff *ctx, __u8 next
 			int ret;
 
 			/* Port offsets for UDP and TCP are the same */
-			ret = l4_load_port(ctx, l4_off + TCP_SPORT_OFF, &old_port);
-			if (IS_ERR(ret))
-				return ret;
+			if (l4_load_port(ctx, l4_off + TCP_SPORT_OFF, &old_port) < 0)
+				return DROP_INVALID;
 
 			if (port != old_port) {
 #ifdef ENABLE_SCTP
@@ -1522,7 +1521,7 @@ lb4_to_lb6(struct __ctx_buff *ctx __maybe_unused,
 }
 
 static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
-				     int l3_off, int l4_off,
+				     bool is_fragment, int l3_off, int l4_off,
 				     struct lb4_key *key,
 				     struct ipv4_ct_tuple *tuple,
 				     const struct lb4_service *svc,
@@ -1547,7 +1546,7 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 	if (unlikely(svc->count == 0))
 		return DROP_NO_SERVICE;
 
-	ret = ct_lazy_lookup4(map, tuple, ctx, l4_off, has_l4_header,
+	ret = ct_lazy_lookup4(map, tuple, ctx, is_fragment, l4_off, has_l4_header,
 			      CT_SERVICE, SCOPE_REVERSE, CT_ENTRY_ANY, state, &monitor);
 	switch (ret) {
 	case CT_NEW:

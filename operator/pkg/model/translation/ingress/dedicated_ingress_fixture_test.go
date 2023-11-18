@@ -11,6 +11,8 @@ import (
 	envoy_config_core_v3 "github.com/cilium/proxy/go/envoy/config/core/v3"
 	envoy_config_listener "github.com/cilium/proxy/go/envoy/config/listener/v3"
 	envoy_config_route_v3 "github.com/cilium/proxy/go/envoy/config/route/v3"
+	grpc_stats_v3 "github.com/cilium/proxy/go/envoy/extensions/filters/http/grpc_stats/v3"
+	grpc_web_v3 "github.com/cilium/proxy/go/envoy/extensions/filters/http/grpc_web/v3"
 	envoy_extensions_filters_http_router_v3 "github.com/cilium/proxy/go/envoy/extensions/filters/http/router/v3"
 	envoy_extensions_listener_proxy_protocol_v3 "github.com/cilium/proxy/go/envoy/extensions/filters/listener/proxy_protocol/v3"
 	envoy_extensions_listener_tls_inspector_v3 "github.com/cilium/proxy/go/envoy/extensions/filters/listener/tls_inspector/v3"
@@ -69,7 +71,10 @@ var socketOptions = []*envoy_config_core_v3.SocketOption{
 
 func toEnvoyCluster(namespace, name, port string) *envoy_config_cluster_v3.Cluster {
 	return &envoy_config_cluster_v3.Cluster{
-		Name: fmt.Sprintf("%s/%s:%s", namespace, name, port),
+		Name: fmt.Sprintf("%s:%s:%s", namespace, name, port),
+		EdsClusterConfig: &envoy_config_cluster_v3.Cluster_EdsClusterConfig{
+			ServiceName: fmt.Sprintf("%s/%s:%s", namespace, name, port),
+		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": toAny(&envoy_upstreams_http_v3.HttpProtocolOptions{
 				CommonHttpProtocolOptions: &envoy_config_core_v3.HttpProtocolOptions{
@@ -97,33 +102,7 @@ func toRouteAction(namespace, name, port string) *envoy_config_route_v3.Route_Ro
 	return &envoy_config_route_v3.Route_Route{
 		Route: &envoy_config_route_v3.RouteAction{
 			ClusterSpecifier: &envoy_config_route_v3.RouteAction_Cluster{
-				Cluster: fmt.Sprintf("%s/%s:%s", namespace, name, port),
-			},
-			MaxStreamDuration: &envoy_config_route_v3.RouteAction_MaxStreamDuration{
-				MaxStreamDuration: &durationpb.Duration{Seconds: 0},
-			},
-		},
-	}
-}
-
-func toWeightedClusterRouteAction(names []string) *envoy_config_route_v3.Route_Route {
-	weightedClusters := make([]*envoy_config_route_v3.WeightedCluster_ClusterWeight, 0, len(names))
-	for _, name := range names {
-		weightedClusters = append(weightedClusters, &envoy_config_route_v3.WeightedCluster_ClusterWeight{
-			Name:   name,
-			Weight: &wrapperspb.UInt32Value{Value: 1},
-		})
-	}
-
-	return &envoy_config_route_v3.Route_Route{
-		Route: &envoy_config_route_v3.RouteAction{
-			ClusterSpecifier: &envoy_config_route_v3.RouteAction_WeightedClusters{
-				WeightedClusters: &envoy_config_route_v3.WeightedCluster{
-					Clusters: weightedClusters,
-				},
-			},
-			MaxStreamDuration: &envoy_config_route_v3.RouteAction_MaxStreamDuration{
-				MaxStreamDuration: &durationpb.Duration{Seconds: 0},
+				Cluster: fmt.Sprintf("%s:%s:%s", namespace, name, port),
 			},
 		},
 	}
@@ -155,10 +134,30 @@ func toListenerFilter(name string) *envoy_config_listener.Filter {
 				SkipXffAppend:    false,
 				HttpFilters: []*http_connection_manager_v3.HttpFilter{
 					{
+						Name: "envoy.filters.http.grpc_web",
+						ConfigType: &http_connection_manager_v3.HttpFilter_TypedConfig{
+							TypedConfig: toAny(&grpc_web_v3.GrpcWeb{}),
+						},
+					},
+					{
+						Name: "envoy.filters.http.grpc_stats",
+						ConfigType: &http_connection_manager_v3.HttpFilter_TypedConfig{
+							TypedConfig: toAny(&grpc_stats_v3.FilterConfig{
+								EmitFilterState:     true,
+								EnableUpstreamStats: true,
+							}),
+						},
+					},
+					{
 						Name: "envoy.filters.http.router",
 						ConfigType: &http_connection_manager_v3.HttpFilter_TypedConfig{
 							TypedConfig: toAny(&envoy_extensions_filters_http_router_v3.Router{}),
 						},
+					},
+				},
+				CommonHttpProtocolOptions: &envoy_config_core_v3.HttpProtocolOptions{
+					MaxStreamDuration: &durationpb.Duration{
+						Seconds: 0,
 					},
 				},
 			}),
@@ -530,10 +529,7 @@ var hostRulesListenersCiliumEnvoyConfig = &ciliumv2.CiliumEnvoyConfig{
 											Prefix: "/",
 										},
 									},
-									Action: toWeightedClusterRouteAction([]string{
-										"random-namespace/foo-bar-com:http",
-										"random-namespace/foo-bar-com:http",
-									}),
+									Action: toRouteAction("random-namespace", "foo-bar-com", "http"),
 								},
 							},
 						},

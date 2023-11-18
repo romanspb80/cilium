@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -24,10 +23,10 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/annotation"
-	"github.com/cilium/cilium/pkg/bandwidth"
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/link"
+	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
@@ -57,6 +56,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 	"github.com/cilium/cilium/pkg/types"
 )
@@ -404,8 +404,15 @@ func (e *Endpoint) InitEndpointScope(parent cell.Scope) {
 }
 
 func (e *Endpoint) Close() {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
 	if e.closeHealthReporter != nil {
 		e.closeHealthReporter()
+	}
+
+	if e.PolicyMapPressureUpdater != nil {
+		e.PolicyMapPressureUpdater.Remove(e.ID)
 	}
 }
 
@@ -1635,7 +1642,7 @@ type MetadataResolverCB func(ns, podName string) (pod *slim_corev1.Pod, _ []slim
 //
 // This assumes that after the initial successful resolution, other mechanisms
 // will handle updates (such as pkg/k8s/watchers informers).
-func (e *Endpoint) RunMetadataResolver(resolveMetadata MetadataResolverCB) {
+func (e *Endpoint) RunMetadataResolver(bwm bandwidth.Manager, resolveMetadata MetadataResolverCB) {
 	done := make(chan struct{})
 	controllerName := resolveLabels + "-" + e.GetK8sNamespaceAndPodName()
 	go func() {
@@ -1675,7 +1682,7 @@ func (e *Endpoint) RunMetadataResolver(resolveMetadata MetadataResolverCB) {
 					value, _ := annotation.Get(po, annotation.ProxyVisibility, annotation.ProxyVisibilityAlias)
 					return value, nil
 				})
-				e.UpdateBandwidthPolicy(func(ns, podName string) (bandwidthEgress string, err error) {
+				e.UpdateBandwidthPolicy(bwm, func(ns, podName string) (bandwidthEgress string, err error) {
 					_, _, _, _, annotations, err := resolveMetadata(ns, podName)
 					if err != nil {
 						return "", err

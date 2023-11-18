@@ -9,13 +9,11 @@ import (
 	"net/netip"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/cidr"
-	"github.com/cilium/cilium/pkg/controller"
 	datapathIpcache "github.com/cilium/cilium/pkg/datapath/ipcache"
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
@@ -50,24 +48,10 @@ import (
 	"github.com/cilium/cilium/pkg/source"
 )
 
-var metricsmapBPFPromSyncControllerGroup = controller.NewGroup("metricsmap-bpf-prom-sync")
-
 // LocalConfig returns the local configuration of the daemon's nodediscovery.
 func (d *Daemon) LocalConfig() *datapath.LocalNodeConfiguration {
 	d.nodeDiscovery.WaitForLocalNodeInit()
 	return &d.nodeDiscovery.LocalConfig
-}
-
-func deleteHostDevice() {
-	link, err := netlink.LinkByName(defaults.HostDevice)
-	if err != nil {
-		log.WithError(err).Warningf("Unable to lookup host device %s. No old cilium_host interface exists", defaults.HostDevice)
-		return
-	}
-
-	if err := netlink.LinkDel(link); err != nil {
-		log.WithError(err).Errorf("Unable to delete host device %s to change allocation CIDR", defaults.HostDevice)
-	}
 }
 
 // listFilterIfs returns a map of interfaces based on the given filter.
@@ -450,17 +434,6 @@ func (d *Daemon) initMaps() error {
 			}
 		}
 	}
-
-	// Start the controller for periodic sync of the metrics map with
-	// the prometheus server.
-	controller.NewManager().UpdateController(
-		"metricsmap-bpf-prom-sync",
-		controller.ControllerParams{
-			Group:       metricsmapBPFPromSyncControllerGroup,
-			DoFunc:      metricsmap.SyncMetricsMap,
-			RunInterval: 5 * time.Second,
-			Context:     d.ctx,
-		})
 
 	if !option.Config.RestoreState {
 		// If we are not restoring state, all endpoints can be

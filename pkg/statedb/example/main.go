@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/cilium/cilium/pkg/hive/job"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/statedb"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 var Hive = hive.New(
@@ -24,7 +24,7 @@ var Hive = hive.New(
 	statedb.Cell,
 
 	// The backends table stores the desired state of the backends.
-	BackendTableCell,
+	cell.Provide(NewBackendTable),
 
 	// Control-plane simulation for the backends table to provide the
 	// desired state.

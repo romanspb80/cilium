@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
@@ -39,11 +38,14 @@ import (
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/crypto/certificatemanager"
 	linuxdatapath "github.com/cilium/cilium/pkg/datapath/linux"
+	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
+	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
 	"github.com/cilium/cilium/pkg/datapath/maps"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
+	"github.com/cilium/cilium/pkg/datapath/tunnel"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/egressgateway"
@@ -91,8 +93,10 @@ import (
 	"github.com/cilium/cilium/pkg/proxy"
 	"github.com/cilium/cilium/pkg/rate"
 	"github.com/cilium/cilium/pkg/resiliency"
+	"github.com/cilium/cilium/pkg/service"
 	"github.com/cilium/cilium/pkg/statedb"
 	"github.com/cilium/cilium/pkg/sysctl"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/version"
 	wireguard "github.com/cilium/cilium/pkg/wireguard/agent"
 )
@@ -297,9 +301,13 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 
 	flags.Var(option.NewNamedMapOptions(option.IPAMMultiPoolPreAllocation, &option.Config.IPAMMultiPoolPreAllocation, nil),
 		option.IPAMMultiPoolPreAllocation,
-		fmt.Sprintf("Defines the minimum number of IPs a node should pre-allocate from each pool (default %s)", defaults.IPAMMultiPoolPreAllocation))
-	vp.SetDefault(option.IPAMMultiPoolPreAllocation, defaults.IPAMMultiPoolPreAllocation)
+		fmt.Sprintf("Defines the minimum number of IPs a node should pre-allocate from each pool (default %s=8)", defaults.IPAMDefaultIPPool))
+	vp.SetDefault(option.IPAMMultiPoolPreAllocation, "")
 	option.BindEnv(vp, option.IPAMMultiPoolPreAllocation)
+
+	flags.String(option.IPAMDefaultIPPool, defaults.IPAMDefaultIPPool, "Name of the default IP Pool when using multi-pool")
+	vp.SetDefault(option.IPAMDefaultIPPool, defaults.IPAMDefaultIPPool)
+	option.BindEnv(vp, option.IPAMDefaultIPPool)
 
 	flags.StringSlice(option.ExcludeLocalAddress, []string{}, "Exclude CIDR from being recognized as local address")
 	option.BindEnv(vp, option.ExcludeLocalAddress)
@@ -559,12 +567,6 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.MarkHidden(option.AddressScopeMax)
 	option.BindEnv(vp, option.AddressScopeMax)
 
-	flags.Bool(option.EnableBandwidthManager, false, "Enable BPF bandwidth manager")
-	option.BindEnv(vp, option.EnableBandwidthManager)
-
-	flags.Bool(option.EnableBBR, false, "Enable BBR for the bandwidth manager")
-	option.BindEnv(vp, option.EnableBBR)
-
 	flags.Bool(option.EnableRecorder, false, "Enable BPF datapath pcap recorder")
 	option.BindEnv(vp, option.EnableRecorder)
 
@@ -696,12 +698,6 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.Bool(option.EnableIPMasqAgent, false, "Enable BPF ip-masq-agent")
 	option.BindEnv(vp, option.EnableIPMasqAgent)
 
-	flags.Bool(option.EnableIPv6BIGTCP, false, "Enable IPv6 BIG TCP option which increases device's maximum GRO/GSO limits for IPv6")
-	option.BindEnv(vp, option.EnableIPv6BIGTCP)
-
-	flags.Bool(option.EnableIPv4BIGTCP, false, "Enable IPv4 BIG TCP option which increases device's maximum GRO/GSO limits for IPv4")
-	option.BindEnv(vp, option.EnableIPv4BIGTCP)
-
 	flags.Bool(option.EnableIPv4EgressGateway, false, "Enable egress gateway for IPv4")
 	option.BindEnv(vp, option.EnableIPv4EgressGateway)
 
@@ -717,12 +713,6 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.Bool(option.InstallIptRules, true, "Install base iptables rules for cilium to mainly interact with kube-proxy (and masquerading)")
 	flags.MarkHidden(option.InstallIptRules)
 	option.BindEnv(vp, option.InstallIptRules)
-
-	flags.Duration(option.IPTablesLockTimeout, 5*time.Second, "Time to pass to each iptables invocation to wait for xtables lock acquisition")
-	option.BindEnv(vp, option.IPTablesLockTimeout)
-
-	flags.Bool(option.IPTablesRandomFully, false, "Set iptables flag random-fully on masquerading rules")
-	option.BindEnv(vp, option.IPTablesRandomFully)
 
 	flags.Int(option.MaxCtrlIntervalName, 0, "Maximum interval (in seconds) between controller runs. Zero is no limit.")
 	flags.MarkHidden(option.MaxCtrlIntervalName)
@@ -770,19 +760,8 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.Bool(option.ExternalEnvoyProxy, false, "whether the Envoy is deployed externally in form of a DaemonSet or not")
 	option.BindEnv(vp, option.ExternalEnvoyProxy)
 
-	flags.StringP(option.TunnelName, "t", "", fmt.Sprintf("Tunnel mode {%s} (default \"vxlan\" for the \"veth\" datapath mode)", option.GetTunnelModes()))
-	option.BindEnv(vp, option.TunnelName)
-	flags.MarkDeprecated(option.TunnelName,
-		fmt.Sprintf("This option will be removed in v1.15. Please use --%s and --%s instead.", option.RoutingMode, option.TunnelProtocol))
-
 	flags.String(option.RoutingMode, defaults.RoutingMode, fmt.Sprintf("Routing mode (%q or %q)", option.RoutingModeNative, option.RoutingModeTunnel))
 	option.BindEnv(vp, option.RoutingMode)
-
-	flags.String(option.TunnelProtocol, defaults.TunnelProtocol, "Encapsulation protocol to use for the overlay (\"vxlan\" or \"geneve\")")
-	option.BindEnv(vp, option.TunnelProtocol)
-
-	flags.Int(option.TunnelPortName, 0, fmt.Sprintf("Tunnel port (default %d for \"vxlan\" and %d for \"geneve\")", defaults.TunnelPortVXLAN, defaults.TunnelPortGeneve))
-	option.BindEnv(vp, option.TunnelPortName)
 
 	flags.Int(option.TracePayloadlen, 128, "Length of payload to capture when tracing")
 	option.BindEnv(vp, option.TracePayloadlen)
@@ -1006,6 +985,9 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.Bool(option.HubbleRedactHttpURLQuery, defaults.HubbleRedactHttpURLQuery, "Hubble redact http URL query from flows")
 	option.BindEnv(vp, option.HubbleRedactHttpURLQuery)
 
+	flags.Bool(option.HubbleRedactHttpUserInfo, defaults.HubbleRedactHttpUserInfo, "Hubble redact http user info from flows")
+	option.BindEnv(vp, option.HubbleRedactHttpUserInfo)
+
 	flags.Bool(option.HubbleRedactKafkaApiKey, defaults.HubbleRedactKafkaApiKey, "Hubble redact Kafka API key from flows")
 	option.BindEnv(vp, option.HubbleRedactKafkaApiKey)
 
@@ -1014,9 +996,6 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 
 	flags.StringSlice(option.HubbleRedactHttpHeadersDeny, []string{}, "HTTP headers to redact from flows")
 	option.BindEnv(vp, option.HubbleRedactHttpHeadersDeny)
-
-	flags.StringSlice(option.DisableIptablesFeederRules, []string{}, "Chains to ignore when installing feeder rules.")
-	option.BindEnv(vp, option.DisableIptablesFeederRules)
 
 	flags.Bool(option.EnableIPv4FragmentsTrackingName, defaults.EnableIPv4FragmentsTracking, "Enable IPv4 fragments tracking for L4-based lookups")
 	option.BindEnv(vp, option.EnableIPv4FragmentsTrackingName)
@@ -1147,6 +1126,10 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.StringSlice(option.PolicyCIDRMatchMode, defaults.PolicyCIDRMatchMode, "The entities that can be selected by CIDR policy. Supported values: 'nodes'")
 	option.BindEnv(vp, option.PolicyCIDRMatchMode)
 
+	flags.Duration(option.MaxInternalTimerDelay, defaults.MaxInternalTimerDelay, "Maximum internal timer value across the entire agent. Use in test environments to detect race conditions in agent logic.")
+	flags.MarkHidden(option.MaxInternalTimerDelay)
+	option.BindEnv(vp, option.MaxInternalTimerDelay)
+
 	if err := vp.BindPFlags(flags); err != nil {
 		log.Fatalf("BindPFlags failed: %s", err)
 	}
@@ -1196,6 +1179,8 @@ func initDaemonConfig(vp *viper.Viper) {
 		lbmap.SizeofSockRevNat6Key+lbmap.SizeofSockRevNat6Value)
 
 	option.Config.Populate(vp)
+
+	time.MaxInternalTimerDelay = vp.GetDuration(option.MaxInternalTimerDelay)
 }
 
 func initEnv(vp *viper.Viper) {
@@ -1431,11 +1416,6 @@ func initEnv(vp *viper.Viper) {
 		}
 	}
 
-	if option.Config.EnableBandwidthManager && option.Config.EnableIPSec {
-		log.Warning("The bandwidth manager cannot be used with IPSec. Disabling the bandwidth manager.")
-		option.Config.EnableBandwidthManager = false
-	}
-
 	if option.Config.EnableIPv6Masquerade && option.Config.EnableBPFMasquerade && option.Config.EnableHostFirewall {
 		// We should be able to support this, but we first need to
 		// check how this plays in the datapath if BPF-masquerading is
@@ -1662,6 +1642,7 @@ type daemonParams struct {
 	ClusterMesh          *clustermesh.ClusterMesh
 	MonitorAgent         monitorAgent.Agent
 	L2Announcer          *l2announcer.L2Announcer
+	ServiceManager       service.ServiceManager
 	L7Proxy              *proxy.Proxy
 	DB                   *statedb.DB
 	APILimiterSet        *rate.APILimiterSet
@@ -1677,6 +1658,9 @@ type daemonParams struct {
 	StoreFactory        store.Factory
 	EndpointRegenerator *endpoint.Regenerator
 	ClusterInfo         cmtypes.ClusterInfo
+	BigTCPConfig        *bigtcp.Configuration
+	TunnelConfig        tunnel.Config
+	BandwidthManager    bandwidth.Manager
 }
 
 func newDaemonPromise(params daemonParams) promise.Promise[*Daemon] {
@@ -1843,25 +1827,14 @@ func startDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *da
 
 		ms := maps.NewMapSweeper(&EndpointMapManager{
 			EndpointManager: d.endpointManager,
-		})
+		}, d.bwManager)
 		ms.CollectStaleMapGarbage()
 		ms.RemoveDisabledMaps()
 
-		if len(d.restoredCIDRs) > 0 {
-			// Release restored CIDR identities after a grace period (default 10
-			// minutes).  Any identities actually in use will still exist after
-			// this.
-			//
-			// This grace period is needed when running on an external workload
-			// where policy synchronization is not done via k8s. Also in k8s
-			// case it is prudent to allow concurrent endpoint regenerations to
-			// (re-)allocate the restored identities before we release them.
-			time.Sleep(option.Config.IdentityRestoreGracePeriod)
-			log.Debugf("Releasing reference counts for %d restored CIDR identities", len(d.restoredCIDRs))
-			d.ipcache.ReleaseCIDRIdentitiesByCIDR(d.restoredCIDRs)
-			// release the memory held by restored CIDRs
-			d.restoredCIDRs = nil
-		}
+		// Sleep for the --identity-restore-grace-period (default 10 minutes), allowing
+		// the normal allocation processes to finish, before releasing restored resources.
+		time.Sleep(option.Config.IdentityRestoreGracePeriod)
+		d.releaseRestoredCIDRs()
 	}()
 	d.endpointManager.Subscribe(d)
 	// Add the endpoint manager unsubscribe as the last step in cleanup

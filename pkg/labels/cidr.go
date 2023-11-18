@@ -21,9 +21,7 @@ import (
 //
 // For IPv6 addresses, it converts ":" into "-" as EndpointSelectors don't
 // support colons inside the name section of a label.
-func maskedIPToLabel(ip netip.Addr, prefix int) Label {
-	ipStr := ip.String()
-
+func maskedIPToLabel(ipStr string, prefix int) Label {
 	var str strings.Builder
 	str.Grow(
 		1 /* preZero */ +
@@ -70,13 +68,13 @@ func IPStringToLabel(ip string) (Label, error) {
 		if err != nil {
 			return Label{}, fmt.Errorf("%q is not an IP address: %w", ip, err)
 		}
-		return maskedIPToLabel(parsedIP, parsedIP.BitLen()), nil
+		return maskedIPToLabel(ip, parsedIP.BitLen()), nil
 	} else {
 		parsedPrefix, err := netip.ParsePrefix(ip)
 		if err != nil {
 			return Label{}, fmt.Errorf("%q is not a CIDR: %w", ip, err)
 		}
-		return maskedIPToLabel(parsedPrefix.Masked().Addr(), parsedPrefix.Bits()), nil
+		return maskedIPToLabel(parsedPrefix.Masked().Addr().String(), parsedPrefix.Bits()), nil
 	}
 }
 
@@ -114,7 +112,6 @@ func GetCIDRLabels(prefix netip.Prefix) Labels {
 		nil, // avoid allocating space for the intermediate results until we need it
 		addr,
 		ones,
-		0,
 	)
 	addWorldLabel(addr, lbls)
 
@@ -134,7 +131,7 @@ var (
 	mu lock.Mutex
 )
 
-const cidrLabelsCacheMaxSize = 16384
+const cidrLabelsCacheMaxSize = 8192
 
 func addWorldLabel(addr netip.Addr, lbls Labels) {
 	switch {
@@ -155,12 +152,12 @@ var (
 	worldLabelV6           = Label{Source: LabelSourceReserved, Key: IDNameWorldIPv6}
 )
 
-func computeCIDRLabels(cache *simplelru.LRU[netip.Prefix, []Label], lbls Labels, results []Label, addr netip.Addr, ones, i int) []Label {
-	if i > ones {
+func computeCIDRLabels(cache *simplelru.LRU[netip.Prefix, []Label], lbls Labels, results []Label, addr netip.Addr, ones int) []Label {
+	if ones < 0 {
 		return results
 	}
 
-	prefix := netip.PrefixFrom(addr, i)
+	prefix, _ := addr.Prefix(ones)
 
 	mu.Lock()
 	cachedLbls, ok := cache.Get(prefix)
@@ -177,7 +174,7 @@ func computeCIDRLabels(cache *simplelru.LRU[netip.Prefix, []Label], lbls Labels,
 	}
 
 	// Compute the label for this prefix (e.g. "cidr:10.0.0.0/8")
-	prefixLabel := maskedIPToLabel(prefix.Masked().Addr(), i)
+	prefixLabel := maskedIPToLabel(prefix.Addr().String(), ones)
 	lbls[prefixLabel.Key] = prefixLabel
 
 	// Keep computing the rest (e.g. "cidr:10.0.0.0/7", ...).
@@ -185,12 +182,12 @@ func computeCIDRLabels(cache *simplelru.LRU[netip.Prefix, []Label], lbls Labels,
 		cache,
 		lbls,
 		append(results, prefixLabel),
-		addr, ones, i+1,
+		prefix.Addr(), ones-1,
 	)
 
 	// Cache the resulting labels derived from this prefix, e.g. /8, /7, ...
 	mu.Lock()
-	cache.Add(prefix, results[i:])
+	cache.Add(prefix, results[len(results)-ones-1:])
 	mu.Unlock()
 
 	return results

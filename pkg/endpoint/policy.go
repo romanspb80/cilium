@@ -12,13 +12,13 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/eventqueue"
@@ -36,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/revert"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -710,7 +711,7 @@ func (e *Endpoint) Regenerate(regenMetadata *regeneration.ExternalRegenerationMe
 				e.getLogger().WithError(regenError).Error("endpoint regeneration failed")
 				hr.Degraded("Endpoint regeneration failed", regenError)
 			}
-			hr.OK(("Endpoint regeneration successful"))
+			hr.OK("Endpoint regeneration successful")
 		} else {
 			// This may be unnecessary(?) since 'closing' of the results
 			// channel means that event has been cancelled?
@@ -910,12 +911,6 @@ func (e *Endpoint) SetIdentity(identity *identityPkg.Identity, newEndpoint bool)
 	})
 }
 
-// GetCIDRPrefixLengths returns the sorted list of unique prefix lengths used
-// for CIDR policy or IPcache lookup from this endpoint.
-func (e *Endpoint) GetCIDRPrefixLengths() (s6, s4 []int) {
-	return e.owner.GetCIDRPrefixLengths()
-}
-
 // AnnotationsResolverCB provides an implementation for resolving the pod
 // annotations.
 type AnnotationsResolverCB func(ns, podName string) (proxyVisibility string, err error)
@@ -964,8 +959,9 @@ func (e *Endpoint) UpdateVisibilityPolicy(annoCB AnnotationsResolverCB) {
 
 // UpdateBandwidthPolicy updates the egress bandwidth of this endpoint to
 // progagate the throttle rate to the BPF data path.
-func (e *Endpoint) UpdateBandwidthPolicy(annoCB AnnotationsResolverCB) {
+func (e *Endpoint) UpdateBandwidthPolicy(bwm bandwidth.Manager, annoCB AnnotationsResolverCB) {
 	ch, err := e.eventQueue.Enqueue(eventqueue.NewEvent(&EndpointPolicyBandwidthEvent{
+		bwm:    bwm,
 		ep:     e,
 		annoCB: annoCB,
 	}))

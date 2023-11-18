@@ -126,6 +126,7 @@ Zannoni
 Zhou
 aarch
 alibabacloud
+allocatable
 allocateLoadBalancerNodePorts
 allocator
 allocators
@@ -317,6 +318,7 @@ getpeername
 gettingstarted
 github
 gke
+glibc
 gluecon
 gobpf
 golang
@@ -534,6 +536,7 @@ pluggable
 pmdabcc
 png
 podCIDR
+podippool
 policyCIDRMatchMode
 policymap
 poller
@@ -702,6 +705,7 @@ uptime
 uretprobes
 url
 urlQuery
+userInfo
 userspace
 uuid
 vCPU
@@ -726,6 +730,7 @@ webhook
 webhooks
 webservice
 whitespace
+wildcarded
 workqueue
 www
 xDS

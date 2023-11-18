@@ -4,18 +4,19 @@
 package statedb
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	iradix "github.com/hashicorp/go-immutable-radix/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // DB provides an in-memory transaction database built on top of immutable radix
@@ -84,8 +85,10 @@ import (
 //  6. Periodically garbage collect the graveyard by finding
 //     the lowest revision of all delete trackers.
 type DB struct {
+	mu                  lock.Mutex // protects 'tables' and sequences modifications to the root tree
 	tables              map[TableName]TableMeta
-	mu                  lock.Mutex // sequences modifications to the root tree
+	ctx                 context.Context
+	cancel              context.CancelFunc
 	root                atomic.Pointer[iradix.Tree[tableEntry]]
 	gcTrigger           chan struct{} // trigger for graveyard garbage collection
 	gcExited            chan struct{}
@@ -101,28 +104,62 @@ func NewDB(tables []TableMeta, metrics Metrics) (*DB, error) {
 		gcRateLimitInterval: defaultGCRateLimitInterval,
 	}
 	for _, t := range tables {
-		name := t.Name()
-		if _, ok := db.tables[name]; ok {
-			return nil, tableError(name, ErrDuplicateTable)
+		if err := db.registerTable(t, txn); err != nil {
+			return nil, err
 		}
-		db.tables[name] = t
-		var table tableEntry
-		table.meta = t
-		table.deleteTrackers = iradix.New[deleteTracker]()
-		indexTxn := iradix.New[indexTree]().Txn()
-		indexTxn.Insert([]byte(t.primaryIndexer().name), iradix.New[object]())
-		indexTxn.Insert([]byte(RevisionIndex), iradix.New[object]())
-		indexTxn.Insert([]byte(GraveyardIndex), iradix.New[object]())
-		indexTxn.Insert([]byte(GraveyardRevisionIndex), iradix.New[object]())
-		for index := range t.secondaryIndexers() {
-			indexTxn.Insert([]byte(index), iradix.New[object]())
-		}
-		table.indexes = indexTxn.CommitOnly()
-		txn.Insert(t.tableKey(), table)
 	}
 	db.root.Store(txn.CommitOnly())
 
 	return db, nil
+}
+
+// RegisterTable registers a table to the database:
+//
+//	func NewMyTable() statedb.RWTable[MyTable] { ... }
+//	cell.Provide(NewMyTable),
+//	cell.Invoke(statedb.RegisterTable[MyTable]),
+func RegisterTable[Obj any](db *DB, table RWTable[Obj]) error {
+	return db.RegisterTable(table)
+}
+
+// RegisterTable registers a table to the database.
+func (db *DB) RegisterTable(table TableMeta, tables ...TableMeta) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	txn := db.root.Load().Txn()
+	if err := db.registerTable(table, txn); err != nil {
+		return err
+	}
+	for _, t := range tables {
+		if err := db.registerTable(t, txn); err != nil {
+			return err
+		}
+	}
+	db.root.Store(txn.CommitOnly())
+	return nil
+}
+
+func (db *DB) registerTable(table TableMeta, txn *iradix.Txn[tableEntry]) error {
+	name := table.Name()
+	if _, ok := db.tables[name]; ok {
+		return tableError(name, ErrDuplicateTable)
+	}
+	db.tables[name] = table
+	var entry tableEntry
+	entry.meta = table
+	entry.deleteTrackers = iradix.New[deleteTracker]()
+	indexTxn := iradix.New[indexTree]().Txn()
+	indexTxn.Insert([]byte(table.primaryIndexer().name), iradix.New[object]())
+	indexTxn.Insert([]byte(RevisionIndex), iradix.New[object]())
+	indexTxn.Insert([]byte(GraveyardIndex), iradix.New[object]())
+	indexTxn.Insert([]byte(GraveyardRevisionIndex), iradix.New[object]())
+	for index := range table.secondaryIndexers() {
+		indexTxn.Insert([]byte(index), iradix.New[object]())
+	}
+	entry.indexes = indexTxn.CommitOnly()
+	txn.Insert(table.tableKey(), entry)
+	return nil
 }
 
 // ReadTxn constructs a new read transaction for performing reads against
@@ -190,14 +227,16 @@ func (db *DB) WriteTxn(table TableMeta, tables ...TableMeta) WriteTxn {
 func (db *DB) Start(hive.HookContext) error {
 	db.gcTrigger = make(chan struct{}, 1)
 	db.gcExited = make(chan struct{})
-	go graveyardWorker(db, db.gcRateLimitInterval)
+	db.ctx, db.cancel = context.WithCancel(context.Background())
+	go graveyardWorker(db, db.ctx, db.gcRateLimitInterval)
 	return nil
 }
 
-func (db *DB) Stop(ctx hive.HookContext) error {
+func (db *DB) Stop(stopCtx hive.HookContext) error {
 	close(db.gcTrigger)
+	db.cancel()
 	select {
-	case <-ctx.Done():
+	case <-stopCtx.Done():
 		return errors.New("timed out waiting for graveyard worker to exit")
 	case <-db.gcExited:
 	}

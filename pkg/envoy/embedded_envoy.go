@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cilium/lumberjack/v2"
 	cilium "github.com/cilium/proxy/go/cilium/api"
@@ -21,7 +20,9 @@ import (
 	envoy_config_cluster "github.com/cilium/proxy/go/envoy/config/cluster/v3"
 	envoy_config_core "github.com/cilium/proxy/go/envoy/config/core/v3"
 	envoy_config_endpoint "github.com/cilium/proxy/go/envoy/config/endpoint/v3"
+	envoy_extensions_bootstrap_internal_listener_v3 "github.com/cilium/proxy/go/envoy/extensions/bootstrap/internal_listener/v3"
 	envoy_config_upstream "github.com/cilium/proxy/go/envoy/extensions/upstreams/http/v3"
+
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -34,6 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "envoy-manager")
@@ -432,6 +434,12 @@ func createBootstrap(filePath string, nodeId, cluster string, xdsSock, egressClu
 				Address: &envoy_config_core.Address_Pipe{
 					Pipe: &envoy_config_core.Pipe{Path: adminPath},
 				},
+			},
+		},
+		BootstrapExtensions: []*envoy_config_core.TypedExtensionConfig{
+			{
+				Name:        "envoy.bootstrap.internal_listener",
+				TypedConfig: toAny(&envoy_extensions_bootstrap_internal_listener_v3.InternalListener{}),
 			},
 		},
 		LayeredRuntime: &envoy_config_bootstrap.LayeredRuntime{
