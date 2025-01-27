@@ -221,6 +221,11 @@ spec:
                             type: string
                           minItems: 1
                           type: array
+                        aggregate:
+                          default: false
+                          description: Aggregate flag, when set enables aggregation
+                            cidrs for BGP route advertisement for service
+                          type: boolean
                       required:
                       - addresses
                       type: object

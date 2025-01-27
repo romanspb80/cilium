@@ -8,12 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
-
-	"github.com/cilium/hive/cell"
-	"github.com/sirupsen/logrus"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/pkg/bgpv1/manager/instance"
 	"github.com/cilium/cilium/pkg/bgpv1/manager/store"
@@ -25,6 +21,12 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/labels"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	ciliumslices "github.com/cilium/cilium/pkg/slices"
+	"github.com/cilium/hive/cell"
+	"github.com/projectdiscovery/mapcidr"
+	"github.com/sirupsen/logrus"
+	"go4.org/netipx"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 type ServiceReconcilerOut struct {
@@ -534,6 +536,13 @@ func (r *ServiceReconciler) getServiceAFPaths(p ReconcileParams, desiredPeerAdve
 					return nil, err
 				}
 
+				if advert.Service.Aggregate && len(svc.Status.LoadBalancer.Ingress) > 1 && svc.Spec.ExternalTrafficPolicy != slim_corev1.ServiceExternalTrafficPolicyLocal {
+					desiredPrefixes, err = r.aggregatePrefixes(desiredPrefixes)
+					if err != nil {
+						return nil, fmt.Errorf("failed to aggregate prefixes: %w", err)
+					}
+				}
+
 				for _, prefix := range desiredPrefixes {
 					path := types.NewPathForPrefix(prefix)
 					path.Family = agentFamily
@@ -550,6 +559,32 @@ func (r *ServiceReconciler) getServiceAFPaths(p ReconcileParams, desiredPeerAdve
 		}
 	}
 	return desiredFamilyAdverts, nil
+}
+
+func (r *ServiceReconciler) aggregatePrefixes(desiredPrefixes []netip.Prefix) ([]netip.Prefix, error) {
+	var desiredSumPrefixes []*net.IPNet
+	var aggregatedPrefixes []netip.Prefix
+
+	// convert []netip.Prefix to []*net.IPNet
+	for _, prefix := range desiredPrefixes {
+		desiredSumPrefixes = append(desiredSumPrefixes, netipx.PrefixIPNet(prefix))
+	}
+
+	desiredSumPrefixes, err := mapcidr.AggregateApproxIPs(desiredSumPrefixes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to aggregate prefixes: %w", err)
+	}
+
+	// convert back []*net.IPNet to []netip.Prefix
+	for _, prefix := range desiredSumPrefixes {
+		routePref, _, err := ipNetToNetipPrefixMask(prefix)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert netip.Prefix to netip.IPNet: %w", err)
+		}
+		aggregatedPrefixes = append(aggregatedPrefixes, routePref)
+	}
+
+	return aggregatedPrefixes, nil
 }
 
 func (r *ServiceReconciler) getServicePrefixes(svc *slim_corev1.Service, advert v2alpha1.BGPAdvertisement, ls sets.Set[resource.Key]) ([]netip.Prefix, error) {
@@ -700,18 +735,26 @@ func (r *ServiceReconciler) getLoadBalancerIPRoutePolicy(p ReconcileParams, peer
 	}
 
 	var v4Prefixes, v6Prefixes types.PolicyPrefixMatchList
-	for _, ingress := range svc.Status.LoadBalancer.Ingress {
-		addr, err := netip.ParseAddr(ingress.IP)
+	// Aggregate the prefixes if there is an Aggregate flag and externalTrafficPolicy is not Local
+	if advert.Service.Aggregate && len(svc.Status.LoadBalancer.Ingress) > 1 && svc.Spec.ExternalTrafficPolicy != slim_corev1.ServiceExternalTrafficPolicyLocal {
+		v4Prefixes, v6Prefixes, err = r.getAggregatedPrefixes(v4Prefixes, v6Prefixes, svc.Status.LoadBalancer.Ingress, family)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("failed to aggregate prefixes: %w", err)
 		}
+	} else {
+		for _, ingress := range svc.Status.LoadBalancer.Ingress {
+			addr, err := netip.ParseAddr(ingress.IP)
+			if err != nil {
+				continue
+			}
 
-		if family.Afi == types.AfiIPv4 && addr.Is4() {
-			v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
-		}
+			if family.Afi == types.AfiIPv4 && addr.Is4() {
+				v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
+			}
 
-		if family.Afi == types.AfiIPv6 && addr.Is6() {
-			v6Prefixes = append(v6Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
+			if family.Afi == types.AfiIPv6 && addr.Is6() {
+				v6Prefixes = append(v6Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
+			}
 		}
 	}
 
@@ -726,6 +769,81 @@ func (r *ServiceReconciler) getLoadBalancerIPRoutePolicy(p ReconcileParams, peer
 	}
 
 	return policy, nil
+}
+
+func (r *ServiceReconciler) getAggregatedPrefixes(v4Prefixes types.PolicyPrefixMatchList, v6Prefixes types.PolicyPrefixMatchList, ingressPrefixes []slim_corev1.LoadBalancerIngress, family types.Family) (types.PolicyPrefixMatchList, types.PolicyPrefixMatchList, error) {
+	var ipv4Nets, ipv6Nets []*net.IPNet
+	for _, ingress := range ingressPrefixes {
+		addr, err := netip.ParseAddr(ingress.IP)
+		if err != nil {
+			continue
+		}
+
+		// convert to *net.IPNet
+		mask := addr.BitLen()
+		_, ipnet, err := net.ParseCIDR(fmt.Sprintf("%s/%d", ingress.IP, mask))
+		if err != nil {
+			continue
+		}
+
+		if family.Afi == types.AfiIPv4 && addr.Is4() {
+			ipv4Nets = append(ipv4Nets, ipnet)
+		}
+
+		if family.Afi == types.AfiIPv6 && addr.Is6() {
+			ipv6Nets = append(ipv6Nets, ipnet)
+		}
+	}
+
+	if len(ipv4Nets) > 1 {
+		ipv4NetsAggr, err := mapcidr.AggregateApproxIPs(ipv4Nets)
+		if err != nil {
+			return v4Prefixes, v6Prefixes, fmt.Errorf("failed to aggregate prefixes: %w", err)
+		}
+		// convert back []*net.IPNet to []netip.Prefix
+		for _, prefix := range ipv4NetsAggr {
+			addr, mask, err := ipNetToNetipPrefixMask(prefix)
+			if err != nil {
+				return v4Prefixes, v6Prefixes, fmt.Errorf("failed to convert netip.Prefix to netip.IPNet: %w", err)
+			}
+			v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: addr, PrefixLenMin: mask, PrefixLenMax: mask})
+		}
+	} else if len(ipv4Nets) == 1 {
+		addr, err := netip.ParseAddr(ipv4Nets[0].IP.String())
+		if err != nil {
+			return v4Prefixes, v6Prefixes, fmt.Errorf("failed to aggregate prefixes: %w", err)
+		}
+
+		if family.Afi == types.AfiIPv4 && addr.Is4() {
+			v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
+		}
+	}
+
+	if len(ipv6Nets) > 1 {
+		ipv4NetsAggr, err := mapcidr.AggregateApproxIPs(ipv4Nets)
+		if err != nil {
+			return v4Prefixes, v6Prefixes, fmt.Errorf("failed to aggregate prefixes: %w", err)
+		}
+		// convert back []*net.IPNet to []netip.Prefix
+		for _, prefix := range ipv4NetsAggr {
+			addr, mask, err := ipNetToNetipPrefixMask(prefix)
+			if err != nil {
+				return v4Prefixes, v6Prefixes, fmt.Errorf("failed to convert netip.Prefix to netip.IPNet: %w", err)
+			}
+			v6Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: addr, PrefixLenMin: mask, PrefixLenMax: mask})
+		}
+	} else if len(ipv6Nets) == 1 {
+		addr, err := netip.ParseAddr(ipv6Nets[0].IP.String())
+		if err != nil {
+			return v4Prefixes, v6Prefixes, fmt.Errorf("failed to aggregate prefixes: %w", err)
+		}
+
+		if family.Afi == types.AfiIPv4 && addr.Is4() {
+			v6Prefixes = append(v6Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
+		}
+	}
+
+	return v4Prefixes, v6Prefixes, nil
 }
 
 func (r *ServiceReconciler) getExternalIPRoutePolicy(p ReconcileParams, peer string, family types.Family, svc *slim_corev1.Service, advert v2alpha1.BGPAdvertisement, ls sets.Set[resource.Key]) (*types.RoutePolicy, error) {
@@ -888,4 +1006,22 @@ func serviceLabelSet(svc *slim_corev1.Service) labels.Labels {
 	svcLabels["io.kubernetes.service.name"] = svc.Name
 	svcLabels["io.kubernetes.service.namespace"] = svc.Namespace
 	return labels.Set(svcLabels)
+}
+
+func ipNetToNetipPrefixMask(ipNet *net.IPNet) (netip.Prefix, int, error) {
+	if ipNet == nil {
+		return netip.Prefix{}, 0, fmt.Errorf("ipNet is nil")
+	}
+	ip := ipNet.IP
+
+	// Convert to netip.Addr
+	addr, err := netip.ParseAddr(ip.String())
+	if err != nil {
+		return netip.Prefix{}, 0, fmt.Errorf("invalid IP address: %s", ip.String())
+	}
+
+	mask, _ := ipNet.Mask.Size()
+	prefix := netip.PrefixFrom(addr, mask)
+
+	return prefix, mask, nil
 }

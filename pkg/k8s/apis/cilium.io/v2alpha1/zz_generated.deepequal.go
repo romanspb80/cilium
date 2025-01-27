@@ -171,6 +171,9 @@ func (in *BGPServiceOptions) DeepEqual(other *BGPServiceOptions) bool {
 		return false
 	}
 
+	if in.Aggregate != other.Aggregate {
+		return false
+	}
 	if ((in.Addresses != nil) && (other.Addresses != nil)) || ((in.Addresses == nil) != (other.Addresses == nil)) {
 		in, other := &in.Addresses, &other.Addresses
 		if other == nil {

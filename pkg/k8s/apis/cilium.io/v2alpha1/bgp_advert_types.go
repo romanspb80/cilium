@@ -122,6 +122,11 @@ type BGPAdvertisement struct {
 
 // BGPServiceOptions defines the configuration for Service advertisement type.
 type BGPServiceOptions struct {
+	// Aggregate flag, when set enables aggregation cidrs for BGP route advertisement for service
+	//
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	Aggregate bool `json:"aggregate,omitempty"`
 	// Addresses is a list of service address types which needs to be advertised via BGP.
 	//
 	// +kubebuilder:validation:Required
